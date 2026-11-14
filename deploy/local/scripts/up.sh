@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Create (or update) the local Agentory dev cluster. Safe to re-run.
+#
+# Optional env: ANTHROPIC_API_KEY and/or OPENAI_API_KEY to enable real model
+# calls through Bifrost. Without them the gateways still come up.
+# shellcheck source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+require_cmd docker kind kubectl helm
+require_docker_running
+mkdir -p "${SECRETS_DIR}"
+
+log "kind cluster '${KIND_CLUSTER_NAME}'"
+if cluster_exists; then
+  ok "already exists"
+else
+  kind create cluster --name "${KIND_CLUSTER_NAME}" --config "${LOCAL_DIR}/kind-config.yaml" --wait 0s
+  ok "created"
+fi
+
+log "Helm repositories"
+add_helm_repos
+ok "updated"
+
+log "Calico ${CALICO_CHART_VERSION} (NetworkPolicy enforcement)"
+h upgrade --install calico projectcalico/tigera-operator \
+  --version "${CALICO_CHART_VERSION}" --namespace tigera-operator --create-namespace \
+  -f "${LOCAL_DIR}/values/calico.yaml" --wait --timeout 10m >/dev/null
+k wait --for=condition=Ready nodes --all --timeout=10m >/dev/null
+ok "nodes Ready"
+
+log "Gateway API ${GATEWAY_API_VERSION} CRDs"
+k apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" >/dev/null
+ok "applied"
+
+log "agentgateway ${AGENTGATEWAY_CHART_VERSION}"
+h upgrade --install agentgateway-crds oci://cr.agentgateway.dev/charts/agentgateway-crds \
+  --version "${AGENTGATEWAY_CHART_VERSION}" --namespace agentgateway-system --create-namespace \
+  --wait --timeout 5m >/dev/null
+h upgrade --install agentgateway oci://cr.agentgateway.dev/charts/agentgateway \
+  --version "${AGENTGATEWAY_CHART_VERSION}" --namespace agentgateway-system \
+  -f "${LOCAL_DIR}/values/agentgateway.yaml" --wait --timeout 10m >/dev/null
+k apply -f "${LOCAL_DIR}/manifests/gateway.yaml" >/dev/null
+k -n agentgateway-system wait --for=condition=Programmed gateway/agentory-gateway --timeout=5m >/dev/null
+ok "controller running, Gateway programmed"
+
+log "Tracing: Jaeger + OTel collector ${OTEL_COLLECTOR_CHART_VERSION}"
+k create namespace observability --dry-run=client -o yaml | k apply -f - >/dev/null
+render "${LOCAL_DIR}/manifests/jaeger.yaml" | k apply -f - >/dev/null
+h upgrade --install otel-collector open-telemetry/opentelemetry-collector \
+  --version "${OTEL_COLLECTOR_CHART_VERSION}" --namespace observability \
+  -f "${LOCAL_DIR}/values/otel-collector.yaml" --wait --timeout 10m >/dev/null
+k -n observability rollout status deploy/jaeger --timeout=5m >/dev/null
+ok "collector and Jaeger running"
+
+log "Bifrost ${BIFROST_CHART_VERSION} (LLM gateway)"
+k create namespace bifrost --dry-run=client -o yaml | k apply -f - >/dev/null
+
+# Encryption key and dev virtual key are generated once and reused on re-runs.
+[[ -s "${SECRETS_DIR}/bifrost-encryption-key" ]] || random_hex 32 > "${SECRETS_DIR}/bifrost-encryption-key"
+[[ -s "${SECRETS_DIR}/dev-virtual-key" ]] || echo "sk-bf-$(random_hex 24)" > "${SECRETS_DIR}/dev-virtual-key"
+chmod 600 "${SECRETS_DIR}"/*
+
+k -n bifrost create secret generic bifrost-encryption \
+  --from-file=encryption-key="${SECRETS_DIR}/bifrost-encryption-key" \
+  --dry-run=client -o yaml | k apply -f - >/dev/null
+
+provider_args=()
+[[ -n "${ANTHROPIC_API_KEY:-}" ]] && provider_args+=(--from-literal=ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}")
+[[ -n "${OPENAI_API_KEY:-}" ]] && provider_args+=(--from-literal=OPENAI_API_KEY="${OPENAI_API_KEY}")
+if ((${#provider_args[@]})); then
+  k -n bifrost create secret generic bifrost-provider-keys "${provider_args[@]}" \
+    --dry-run=client -o yaml | k apply -f - >/dev/null
+else
+  warn "No ANTHROPIC_API_KEY or OPENAI_API_KEY set: Bifrost starts without providers (model calls will fail)."
+fi
+
+bifrost_generated_values "$(cat "${SECRETS_DIR}/dev-virtual-key")" > "${SECRETS_DIR}/bifrost-generated.yaml"
+h upgrade --install bifrost bifrost/bifrost \
+  --version "${BIFROST_CHART_VERSION}" --namespace bifrost --set image.tag="${BIFROST_IMAGE_TAG}" \
+  -f "${LOCAL_DIR}/values/bifrost.yaml" -f "${SECRETS_DIR}/bifrost-generated.yaml" \
+  --wait --timeout 10m >/dev/null
+# Pick up changed provider keys on re-runs (the Secret is read only at start-up).
+k -n bifrost rollout restart deploy/bifrost >/dev/null
+k -n bifrost rollout status deploy/bifrost --timeout=5m >/dev/null
+ok "running"
+
+cat <<EOF
+
+Local cluster is up (context: ${KUBE_CONTEXT}).
+
+  Smoke test:     make smoke
+  Jaeger UI:      kubectl --context ${KUBE_CONTEXT} -n observability port-forward svc/jaeger 16686  → http://localhost:16686
+  Bifrost UI:     kubectl --context ${KUBE_CONTEXT} -n bifrost port-forward svc/bifrost 8080       → http://localhost:8080
+  Dev virtual key: ${SECRETS_DIR}/dev-virtual-key
+  Tear down:      make down
+EOF
