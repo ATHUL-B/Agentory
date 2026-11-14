@@ -65,6 +65,21 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        env:
+          # LLM gateway (Bifrost) admin credentials for per-agent virtual keys.
+          # Optional: without this Secret, key management is disabled.
+          - name: LLM_GATEWAY_ADMIN_USERNAME
+            valueFrom:
+              secretKeyRef:
+                name: llm-gateway-admin
+                key: username
+                optional: true
+          - name: LLM_GATEWAY_ADMIN_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: llm-gateway-admin
+                key: password
+                optional: true
         ports:
         - containerPort: 8081
           name: health

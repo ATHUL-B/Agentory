@@ -25,10 +25,12 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -37,7 +39,9 @@ import (
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 	"github.com/ATHUL-B/Agentory/operator/internal/controller"
+	"github.com/ATHUL-B/Agentory/operator/internal/llmgateway"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
+	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -184,6 +188,9 @@ func main() {
 		// main exits as soon as the manager stops, so releasing is safe; it cuts the
 		// hand-over after a rollout from the lease duration (~15s) to near zero.
 		LeaderElectionReleaseOnCancel: true,
+		// Read Secrets straight from the API server: caching them would mean
+		// watching, and holding in memory, every Secret in the cluster.
+		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}},
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -196,6 +203,7 @@ func main() {
 		Backends: agentruntime.NewRegistry(
 			agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways),
 		),
+		VirtualKeys: virtualKeyManager(mgr, gateways),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agent")
 		os.Exit(1)
@@ -235,4 +243,29 @@ func serviceFlag(ref *agentruntime.ServiceRef, name, usage string) {
 		*ref = parsed
 		return nil
 	})
+}
+
+// Environment variables holding the LLM gateway admin credentials (from a Secret).
+const (
+	envGatewayUsername = "LLM_GATEWAY_ADMIN_USERNAME"
+	envGatewayPassword = "LLM_GATEWAY_ADMIN_PASSWORD"
+)
+
+// virtualKeyManager returns the per-agent key manager, or nil (disabled) when
+// no gateway credentials are configured.
+func virtualKeyManager(mgr ctrl.Manager, gateways agentruntime.GatewayConfig) *virtualkey.Manager {
+	user, pass := os.Getenv(envGatewayUsername), os.Getenv(envGatewayPassword)
+	if user == "" || pass == "" {
+		setupLog.Info("LLM gateway credentials not set; per-agent virtual keys are disabled",
+			"env", []string{envGatewayUsername, envGatewayPassword})
+		return nil
+	}
+	baseURL := gateways.LLMGateway.URL(gateways.ClusterDomain, "")
+	setupLog.Info("per-agent virtual keys enabled", "gateway", baseURL)
+	return &virtualkey.Manager{
+		// Secrets bypass the cache (see Options.Client), so this reads the API server.
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Gateway: llmgateway.NewBifrostClient(baseURL, user, pass, nil),
+	}
 }

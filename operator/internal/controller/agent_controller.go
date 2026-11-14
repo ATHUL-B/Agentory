@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,21 +30,34 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
+	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 )
 
+// FinalizerVirtualKey makes the operator delete an Agent's gateway key before
+// the Agent goes away (the key lives outside the cluster, so garbage collection
+// can't remove it).
+const FinalizerVirtualKey = "agentory.dev/virtual-key"
+
+// virtualKeyResync re-checks keys periodically, so a key the gateway lost (for
+// example after its database was reset) is re-created without waiting for an event.
+const virtualKeyResync = 10 * time.Minute
+
 // AgentReconciler reconciles an Agent object: it records the spec revision and
-// acceptance, then hands the Agent to the runtime backend that supports it
-// (HLD-0001 §4). Agents no backend supports yet stay Ready=False with reason
-// BackendNotImplemented.
+// acceptance, ensures the Agent's LLM gateway virtual key, then hands the Agent
+// to the runtime backend that supports it (HLD-0001 §4). Agents no backend
+// supports yet stay Ready=False with reason BackendNotImplemented.
 type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// Backends selects the runtime backend per Agent. Nil means none.
 	Backends *agentruntime.Registry
+	// VirtualKeys manages per-agent gateway keys. Nil disables key management.
+	VirtualKeys *virtualkey.Manager
 }
 
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents,verbs=get;list;watch;create;update;patch;delete
@@ -51,6 +65,7 @@ type AgentReconciler struct {
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile brings an Agent's status in line with its spec.
@@ -62,60 +77,126 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	desired, err := r.desiredStatus(ctx, &agent)
-	if err != nil {
-		return ctrl.Result{}, err
+	if !agent.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, &agent)
 	}
-	if equality.Semantic.DeepEqual(desired, &agent.Status) {
+	if r.VirtualKeys != nil && controllerutil.AddFinalizer(&agent, FinalizerVirtualKey) {
+		// The update triggers the next reconcile.
+		if err := r.Update(ctx, &agent); err != nil {
+			return statusUpdateResult(err)
+		}
 		return ctrl.Result{}, nil
 	}
 
-	agent.Status = *desired
-	if err := r.Status().Update(ctx, &agent); err != nil {
+	desired, retryErr, err := r.desiredStatus(ctx, &agent)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	result := ctrl.Result{}
+	if r.VirtualKeys != nil {
+		result.RequeueAfter = virtualKeyResync
+	}
+
+	if !equality.Semantic.DeepEqual(desired, &agent.Status) {
+		agent.Status = *desired
+		if err := r.Status().Update(ctx, &agent); err != nil {
+			return statusUpdateResult(err)
+		}
+		log.Info("Updated Agent status", "revision", desired.Revision, "phase", desired.Phase)
+	}
+	// A transient failure (e.g. gateway unreachable) is reported in status first, then retried with backoff.
+	return result, retryErr
+}
+
+// finalize removes what lives outside the cluster, then releases the Agent.
+func (r *AgentReconciler) finalize(ctx context.Context, agent *agentoryv1alpha1.Agent) (ctrl.Result, error) {
+	if !controllerutil.ContainsFinalizer(agent, FinalizerVirtualKey) {
+		return ctrl.Result{}, nil
+	}
+	if r.VirtualKeys != nil {
+		if err := r.VirtualKeys.Cleanup(ctx, agent); err != nil {
+			return ctrl.Result{}, fmt.Errorf("deleting virtual key: %w", err)
+		}
+		logf.FromContext(ctx).Info("Deleted virtual key", "key", virtualkey.KeyName(agent))
+	} else {
+		logf.FromContext(ctx).Info("Released Agent without deleting its virtual key; key management is disabled",
+			"key", virtualkey.KeyName(agent))
+	}
+	controllerutil.RemoveFinalizer(agent, FinalizerVirtualKey)
+	if err := r.Update(ctx, agent); err != nil {
 		return statusUpdateResult(err)
 	}
-	log.Info("agent status updated", "revision", desired.Revision, "phase", desired.Phase)
 	return ctrl.Result{}, nil
 }
 
-func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1alpha1.Agent) (*agentoryv1alpha1.AgentStatus, error) {
+// desiredStatus computes the status. retryErr is a transient failure to report
+// and retry; err aborts the reconcile without a status write.
+func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1alpha1.Agent) (
+	status *agentoryv1alpha1.AgentStatus, retryErr, err error) {
 	revision, err := SpecRevision(agent.Name, &agent.Spec)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	status := agent.Status.DeepCopy()
+	status = agent.Status.DeepCopy()
 	status.ObservedGeneration = agent.Generation
 	status.Revision = revision
 	status.Phase = agentoryv1alpha1.AgentPhasePending
 	r.setCondition(status, agent, ConditionAccepted, true, ReasonSpecValid, "spec passed validation")
 
+	deps := agentruntime.Deps{Revision: revision}
+	keyReady := true
+	if r.VirtualKeys != nil {
+		vk, vkErr := r.VirtualKeys.Ensure(ctx, agent)
+		keyReady = vk.Ready
+		deps.VirtualKeyID = vk.KeyID
+		r.setCondition(status, agent, ConditionVirtualKeyReady, vk.Ready, vk.Reason, vk.Message)
+		if vk.Ready {
+			status.VirtualKeyRef = &corev1.LocalObjectReference{Name: agentruntime.VirtualKeySecretName(agent)}
+		}
+		switch {
+		case vkErr != nil:
+			r.setCondition(status, agent, ConditionReady, false, vk.Reason, "virtual key: "+vk.Message)
+			return status, vkErr, nil
+		case vk.Reason == virtualkey.ReasonResourceConflict:
+			status.Phase = agentoryv1alpha1.AgentPhaseFailed
+			r.setCondition(status, agent, ConditionReady, false, vk.Reason, vk.Message)
+			return status, nil, nil
+		}
+	} else {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionVirtualKeyReady)
+		status.VirtualKeyRef = nil
+	}
+
 	backend, ok := r.Backends.For(agent)
 	if !ok {
 		status.Endpoints = nil
 		r.setCondition(status, agent, ConditionReady, false, ReasonBackendNotImplemented,
-			fmt.Sprintf("no runtime backend yet for runtime=%s lifecycle=%s (backlog items 4-8)",
+			fmt.Sprintf("no runtime backend yet for runtime=%s lifecycle=%s (backlog items 7-8)",
 				agent.Spec.Runtime, agent.Spec.Lifecycle))
-		return status, nil
+		return status, nil, nil
 	}
 
-	rt, err := backend.EnsureAgent(ctx, agent, revision)
+	rt, err := backend.EnsureAgent(ctx, agent, deps)
 	if err != nil {
-		return nil, fmt.Errorf("%s backend: %w", backend.Name(), err)
+		return nil, nil, fmt.Errorf("%s backend: %w", backend.Name(), err)
 	}
 	if rt.InternalEndpoint != "" {
 		status.Endpoints = &agentoryv1alpha1.AgentEndpoints{Internal: rt.InternalEndpoint}
 	}
-	r.setCondition(status, agent, ConditionEgressPolicyApplied, rt.Reason != agentruntime.ReasonResourceConflict,
-		egressReason(rt), egressMessage(rt))
+	conflict := rt.Reason == agentruntime.ReasonResourceConflict
+	r.setCondition(status, agent, ConditionEgressPolicyApplied, !conflict, egressReason(rt), egressMessage(rt))
 	r.setCondition(status, agent, ConditionWorkloadReady, rt.WorkloadReady, rt.Reason, rt.Message)
-	r.setCondition(status, agent, ConditionReady, rt.WorkloadReady, rt.Reason, rt.Message)
-	if rt.WorkloadReady {
+
+	ready := rt.WorkloadReady && keyReady
+	r.setCondition(status, agent, ConditionReady, ready, rt.Reason, rt.Message)
+	switch {
+	case ready:
 		status.Phase = agentoryv1alpha1.AgentPhaseReady
-	} else if rt.Reason == agentruntime.ReasonResourceConflict {
+	case conflict:
 		status.Phase = agentoryv1alpha1.AgentPhaseFailed
 	}
-	return status, nil
+	return status, nil, nil
 }
 
 func (r *AgentReconciler) setCondition(status *agentoryv1alpha1.AgentStatus, agent *agentoryv1alpha1.Agent,
