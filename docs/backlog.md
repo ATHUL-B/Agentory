@@ -17,7 +17,11 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 6 | A2A route + generated Agent Card on agentgateway | P0 | done | HLD-0001 §7, §4.3 | - |
 | 6a | Enforce `a2a.allowedCallers` at the agent gateway (needs per-agent caller identity: ServiceAccount token or actor JWT, see 23) | P1 | todo | HLD needed | - |
 | 6b | MCP routing per agent: `/mcp/<ns>/<agent>` on agentgateway with the agent's `tools.mcpServers` allow-list; platform MCP server registry | P1 | todo | HLD needed | - |
-| 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | todo | HLD-0001 §5.3 | - |
+| 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | done | HLD-0001 §5.3, §4.4 | - |
+| 7a | Harness workspaces: clone `harness.workspace.git` per Task, through a controlled egress exception (git host allow-list via an egress proxy), and push a result branch | P1 | todo | HLD needed | - |
+| 7b | Codex harness image (`kind: codex`) | P2 | todo | - | - |
+| 7c | Dispatch Tasks to service agents over A2A (`message/send`), recording the reply as the result | P1 | todo | - | - |
+| 7d | Cancel a running Task (`Cancelled` phase) and stream harness progress (stream-json) into status/events | P2 | todo | - | - |
 | 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | todo | HLD-0001 §5.2 | - |
 | 9 | End-to-end demo script (four scenarios) | P0 | todo | HLD-0001 §9 | - |
 | 9a | Mock LLM provider (`mock/mock-model`) behind Bifrost: deterministic replies, tool calls, streaming, error injection; used by `make smoke` | P0 | done | HLD-0001 §9 | - |

@@ -15,7 +15,8 @@ Built with kubebuilder v4.16 / controller-runtime.
 | Gateway environment injection and egress/ingress lockdown | ✅ (item 4) |
 | **Per-agent virtual keys** in Bifrost: one key per Agent, only its model, in Secret `<agent>-llm`; re-created if lost; deleted with the Agent | ✅ (item 5) |
 | **A2A exposure**: generated Agent Card + agentgateway A2A backend + HTTPRoute at `/agents/<ns>/<agent>` | ✅ (item 6) |
-| Caller allow-lists (6a), MCP routing (6b), harness Jobs (7), declarative runtime (8) | Backlog |
+| **JobBackend + Tasks**: `harness` agents run each Task as a Job (Claude Code); result, usage, cost, changed files and traceId in `Task.status` | ✅ (item 7) |
+| Caller allow-lists (6a), MCP routing (6b), workspace clone (7a), declarative runtime (8) | Backlog |
 
 ## API at a glance
 
@@ -51,7 +52,7 @@ Full examples: [`config/samples/`](config/samples/).
 ### Status
 
 - `Agent.status`: `phase` (`Ready` once the workload is available, the key is ready and the route accepted; `Failed` on a resource conflict), `observedGeneration`, `revision` (`<name>-<10 hex>`, from a hash of the spec), `endpoints` (`a2a`, `agentCard`, `internal`), `virtualKeyRef`, `conditions` (`Accepted`, `VirtualKeyReady`, `EgressPolicyApplied`, `WorkloadReady`, `GatewayRouteReady`, `Ready`).
-- `Task.status`: `phase` (`Pending` … `Succeeded/Failed/Cancelled`), `agentRevision`, `conditions` (`AgentResolved`, `Started`), plus `traceId`, `usage`, `result` (filled by later backends).
+- `Task.status`: `phase` (`Pending` … `Succeeded/Failed/Cancelled`), `agentRevision`, `startedAt`/`completedAt`, `traceId`, `usage`, `result` (`summary`, `artifacts`), `conditions` (`AgentResolved`, `Started`, `Complete`).
 
 ## What a container Agent gets
 
@@ -153,6 +154,38 @@ needs per-agent caller identity at the gateway), and MCP routes under
 
 Exposure is turned off automatically, and logged, when the Gateway API or
 agentgateway CRDs are not installed.
+
+## Harness agents and Tasks
+
+A `runtime: harness` agent (`lifecycle: perTask`) has no long-lived workload.
+The operator gives it a ServiceAccount, a virtual key and a NetworkPolicy with
+**no ingress** (egress only to DNS, the gateways and the collector), and
+reports `Ready` with reason `ReadyForTasks`.
+
+Each **Task** for it becomes one **Job owned by the Task**, so deleting the
+Task removes it. The Job is configured as follows:
+- `backoffLimit: 0` (one attempt; a coding run is not safely repeatable);
+- `activeDeadlineSeconds` from `spec.timeout`, with a 1 h TTL after finishing;
+- runs as UID 1000 with `fsGroup` and no privilege escalation;
+- `/workspace` and `/tmp` are emptyDirs;
+- the image is the harness default (`--harness-image-claude-code`), or `spec.harness.image`.
+
+The Task controller:
+
+1. Waits for the Agent to be `Ready` (`Started=False`, `AgentNotReady`) and
+   re-checks when the Agent changes.
+2. Records `status.agentRevision` when it starts; that never changes afterwards.
+3. Maps the Job to the phase: `Pending`, `Running`, then `Succeeded` or `Failed`
+   (reason `Timeout` when the deadline passed). Image-pull problems show on a
+   Pending Task as `Complete=False`, `ImageProblem`.
+4. Copies the harness result from the pod's termination message into status:
+   `result.summary`, `result.artifacts` (changed files), `usage` (tokens and
+   cost as a decimal string) and `traceId`. The trace ID finds the LLM gateway's
+   spans for the run in the trace sink.
+
+Tasks for service agents report `Started=False`, `DispatchNotImplemented`;
+they take work over A2A. Setting `harness.workspace` is accepted, but the
+Agent's Ready message says it's not supported yet (backlog 7a).
 
 ## Develop
 

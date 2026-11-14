@@ -255,6 +255,24 @@ are level-triggered and safe to retry.
 - Exposure needs the CRDs. The operator checks the REST mapper at start-up and
   disables exposure otherwise. ConfigMaps, like Secrets, are read uncached.
 
+### 4.4 Implemented (item 7): harness Tasks
+
+- `runtime.TaskBackend.EnsureTask` (separate from `Backend`, so only
+  backends that run Tasks implement it) and `Registry.TaskBackendFor`.
+- `JobBackend`: for the Agent, a ServiceAccount and a no-ingress NetworkPolicy;
+  per Task, one Job owned by the Task (single attempt, deadline from
+  `spec.timeout`, non-root, emptyDir workspace). Its name is the Task name,
+  shortened with a hash past 52 characters.
+- **Results come through the termination message**, not the API: the harness
+  writes ≤ 4 KB JSON to `/dev/termination-log` and the operator reads it from the
+  pod status (pods read uncached). Pods need no API access, which removes the
+  security question from §10.
+- **Trace linking**: the runner sends `traceparent` to Bifrost
+  (`ANTHROPIC_CUSTOM_HEADERS`) and reports the trace ID, so `Task.status.traceId`
+  opens the gateway's spans for the run.
+- Verified: Bifrost serves Anthropic-API clients from an OpenAI-style provider
+  through the Responses API, so the mock implements it.
+
 ## 5. Runtimes
 
 ### 5.1 Container (`runtime: container`)
@@ -275,10 +293,10 @@ are level-triggered and safe to retry.
 ### 5.3 Harness (`runtime: harness`, `lifecycle: perTask`)
 - `JobBackend` creates a Job per Task from a harness image
   (`harness-claude-code`, `harness-codex`).
-- A small entrypoint (`harness-runner`): clone the workspace → run the harness
-  non-interactively with the task message → collect summary, diff/branch and
-  usage → write the result to the Task status (via the operator API or a
-  result ConfigMap) → exit.
+- A small entrypoint (`harness/claude-code/runner.py`): prepare the workspace
+  → run the harness non-interactively with the task message → collect summary,
+  changed files and usage → write the result to the termination message →
+  exit. Cloning a repository is backlog 7a.
 - Model traffic: `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` point to Bifrost; the
   pod only receives a virtual key.
 - `activeDeadlineSeconds` from `Task.spec.timeout`; `ttlSecondsAfterFinished`
@@ -345,7 +363,7 @@ projected ServiceAccount tokens. Actor-chain JWTs are backlog.
 | Bifrost features we need may be enterprise-only | Keep the `LLMGatewayClient` interface; LiteLLM as fallback |
 | agentgateway API churn | Isolate behind `AgentGatewayClient` |
 | Harness CLIs change flags/output formats | Version-pin harness images; contract tests per harness |
-| Writing Task results from the pod securely | Prefer operator-side collection (pod logs / result file) over giving pods API write access |
+| Writing Task results from the pod securely | Resolved: termination message, read by the operator; pods have no API access |
 | No strong isolation in v1 | Internal, trusted agents only; Substrate/Kata backlog item |
 | Open: result store for large artifacts (S3/MinIO?) | Decide in implementation PR |
 | Open: API group domain | `agentory.dev` placeholder until a domain is chosen |

@@ -10,7 +10,7 @@ make up      # create or update the cluster (idempotent)
 make smoke   # end-to-end checks against the running cluster
 make check   # static checks + unit tests, no Docker needed
 make test    # unit tests only (mock LLM + operator)
-make operator-up  # build the operator and the echo agent, load them into kind, deploy
+make operator-up  # build the operator, echo agent and Claude Code harness, load into kind, deploy
 make down    # delete the cluster (PURGE=1 also deletes generated keys)
 ```
 
@@ -108,6 +108,11 @@ curl -s localhost:8080/v1/chat/completions \
     other's generated Agent Card is fetched through the gateway, an A2A
     `message/send` goes gateway → agent → LLM gateway → model and back, and a
     direct pod-to-pod call is blocked; deleting the Agents removes their routes.
+11. Only after `make operator-up`: a harness Agent (Claude Code) becomes Ready;
+    a Task runs as a Job through the LLM gateway with the agent's key and
+    **Succeeds**, listing the file it created, its token usage, and a traceId
+    whose Bifrost spans are in Jaeger; a Task with a 1 s timeout fails with
+    reason `Timeout`; deleting a Task removes its Job.
 
 ## UIs
 
@@ -138,6 +143,10 @@ agent code is unaffected. A Langfuse profile is backlog item 2b.
 | Jaeger `/api/services` returns 404 | Jaeger v2.22 serves the v3 query API | Smoke test uses `/api/v3/services` |
 | 400 for every request, even with no key | With no provider configured, Bifrost fails on provider resolution before auth | The mock provider is always configured |
 | `could not auto resolve a provider` | Model given without a provider prefix | Use `provider/model`, e.g. `mock/mock-model` |
+| Claude Code: "issue with the selected model (mock/mock-model)" | Bifrost turns Anthropic-API calls into OpenAI **Responses API** calls for an OpenAI-style provider, and has no fallback to Chat Completions | The mock serves `/responses` (plain and streaming) |
+| Harness lists no changed files | git refuses a tree owned by another user ("dubious ownership") | Runner passes `-c safe.directory=*`; Jobs set `fsGroup` |
+| Claude Code doesn't call `Write` | `--bare` mode offers Bash, Read and Edit | Drive file changes through `Bash` (or Edit) |
+| Gateway returns 503 right after an Agent is Ready | Route accepted; the proxy picks it up a few seconds later | Retry briefly (the smoke test does) |
 
 ## Troubleshooting
 
