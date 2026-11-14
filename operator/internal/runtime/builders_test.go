@@ -204,7 +204,7 @@ type fakeBackend struct {
 
 func (f fakeBackend) Name() string                          { return f.name }
 func (f fakeBackend) Supports(*agentoryv1alpha1.Agent) bool { return f.ok }
-func (f fakeBackend) EnsureAgent(_ context.Context, _ *agentoryv1alpha1.Agent, _ string) (AgentRuntimeStatus, error) {
+func (f fakeBackend) EnsureAgent(_ context.Context, _ *agentoryv1alpha1.Agent, _ Deps) (AgentRuntimeStatus, error) {
 	return AgentRuntimeStatus{}, nil
 }
 
