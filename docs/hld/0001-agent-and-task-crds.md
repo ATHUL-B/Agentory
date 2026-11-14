@@ -1,6 +1,6 @@
 # HLD-0001: Agent and Task CRDs with pluggable runtime backends
 
-- **Status:** Draft
+- **Status:** In progress. §3 API implemented as `agentory.dev/v1alpha1` (backlog item 3); backends pending
 - **Date:** 2026-11-14
 - **Related:** [ADR-0001](../adr/0001-own-operator-with-pluggable-runtimes.md),
   [ADR-0002](../adr/0002-gateways-and-observability.md)
@@ -135,6 +135,22 @@ Task semantics by agent lifecycle:
 
 Completed Tasks are garbage-collected after a configurable TTL. Traces and
 results remain in the trace sink and result store.
+
+### 3.3 Decisions made while implementing (item 3)
+
+- **API group** is `agentory.dev` (kubebuilder domain `dev`, group `agentory`).
+- **Task spec is immutable** (`self == oldSelf`): a Task is an audit record of
+  what was asked; re-asking means a new Task.
+- **Costs are decimal strings** (`usage.costUsd: "0.31"`): Kubernetes API
+  conventions avoid floats.
+- **Revision** is `<agent>-<first 10 hex of sha256(spec JSON)>`; Tasks copy it
+  into `status.agentRevision`.
+- **Until backends exist**, Agents report `Ready=False` with reason
+  `BackendNotImplemented` and Tasks report `Started=False` with the same reason,
+  so nothing claims to run when it doesn't.
+- **Task→Agent re-queue**: the Task controller watches Agents and re-queues
+  non-terminal Tasks that reference the changed Agent (a namespace list +
+  filter; switch to a field index if Task counts per namespace grow large).
 
 ## 4. Operator design
 

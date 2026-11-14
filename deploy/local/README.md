@@ -9,7 +9,8 @@ so agent egress lockdown is actually enforced (ADR-0002).
 make up      # create or update the cluster (idempotent)
 make smoke   # end-to-end checks against the running cluster
 make check   # static checks + unit tests, no Docker needed
-make test    # unit tests only
+make test    # unit tests only (mock LLM + operator)
+make operator-up  # build the operator, load it into kind, deploy CRDs + controller
 make down    # delete the cluster (PURGE=1 also deletes generated keys)
 ```
 
@@ -35,6 +36,8 @@ All pins live in [`versions.env`](versions.env).
   OrbStack also work.
 - `kind` v0.33.0, `kubectl`, `helm` v3.17+ or v4, on `PATH`.
 - Optional for `make check`: `shellcheck`, `otelcol-contrib` 0.163.x.
+- For the operator: Go (1.26 is fetched automatically), and Docker BuildKit
+  (`docker buildx`) for `make operator-up`.
 
 With Homebrew: `brew install kind kubectl helm shellcheck`.
 
@@ -83,6 +86,9 @@ curl -s localhost:8080/v1/chat/completions \
    spans appear in Jaeger.
 6. Only with a real provider key: that provider answers (200). Override the
    model with `SMOKE_MODEL=provider/model`.
+7. Only after `make operator-up`: the controller is running, an invalid Agent
+   is rejected by CRD validation, a valid Agent is `Accepted`, and a Task
+   resolves its Agent and records the Agent's revision.
 
 ## UIs
 
