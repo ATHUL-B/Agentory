@@ -34,7 +34,7 @@ BIFROST_CHAT=http://bifrost.bifrost.svc.cluster.local:8080/v1/chat/completions
 
 log "Components ready"
 for target in "agentgateway-system deploy/agentgateway" "observability deploy/otel-collector" \
-              "observability deploy/jaeger" "bifrost statefulset/bifrost"; do
+              "observability deploy/jaeger" "mock-llm deploy/mock-llm" "bifrost statefulset/bifrost"; do
   read -r ns obj <<<"$target"
   if k -n "$ns" rollout status "$obj" --timeout=60s >/dev/null 2>&1; then
     pass "$ns/$obj"
@@ -62,26 +62,15 @@ assert_code "$(probe_status http://jaeger.observability.svc.cluster.local:16686)
   "blocked: Jaeger (not on the allow-list)"
 
 log "Bifrost enforces virtual keys"
-# Bifrost resolves the provider before checking credentials, so with no provider
-# configured every request fails with 400 before auth runs. Only meaningful
-# with a provider (a dummy key is enough: the request never leaves the cluster).
-provider_configured=0
-k -n bifrost get secret bifrost-provider-keys >/dev/null 2>&1 && provider_configured=1
-if ((provider_configured)); then
-  if k -n bifrost get secret bifrost-provider-keys -o jsonpath='{.data.ANTHROPIC_API_KEY}' | grep -q .; then
-    default_model="anthropic/claude-haiku-5-5"
-  else
-    default_model="openai/gpt-4o-mini"
-  fi
-  model="${SMOKE_MODEL:-$default_model}"
-  body="{\"model\":\"${model}\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with: ok\"}]}"
-  assert_code "$(probe_status -X POST -H 'Content-Type: application/json' -d "$body" "$BIFROST_CHAT")" "401" \
-    "rejected: no virtual key"
-  assert_code "$(probe_status -X POST -H 'Content-Type: application/json' -H 'x-bf-vk: sk-bf-not-a-key' \
-    -d "$body" "$BIFROST_CHAT")" "401" "rejected: unknown virtual key"
-else
-  warn "skipped: needs a provider (re-run 'make up' with ANTHROPIC_API_KEY or OPENAI_API_KEY)"
-fi
+# The in-cluster mock provider is always configured, so auth is always
+# observable. (With no provider at all, Bifrost answers 400 before checking keys.)
+vk="$(cat "${SECRETS_DIR}/dev-virtual-key")"
+json_post=(-X POST -H 'Content-Type: application/json')
+mock_body='{"model":"mock/mock-model","messages":[{"role":"user","content":"Reply with: ok"}]}'
+assert_code "$(probe_status "${json_post[@]}" -d "$mock_body" "$BIFROST_CHAT")" "401" \
+  "rejected: no virtual key"
+assert_code "$(probe_status "${json_post[@]}" -H 'x-bf-vk: sk-bf-not-a-key' -d "$mock_body" "$BIFROST_CHAT")" "401" \
+  "rejected: unknown virtual key"
 
 log "Tracing: collector → Jaeger"
 trace_id="$(random_hex 16)"; span_id="$(random_hex 8)"; now_ns="$(date +%s)000000000"
@@ -107,32 +96,56 @@ else
   fail "trace ${trace_id} not found in Jaeger after 30s"
 fi
 
-log "Model call through Bifrost with the dev virtual key"
-if ((provider_configured)); then
-  vk="$(cat "${SECRETS_DIR}/dev-virtual-key")"
-  response="$(probe_body -X POST -H 'Content-Type: application/json' -H "x-bf-vk: ${vk}" -d "$body" "$BIFROST_CHAT")"
-  code="$(tail -n1 <<<"$response")"
-  if grep -q '"key":"' <<<"$response" || [[ "$code" == "200" ]]; then
-    pass "virtual key accepted and routed to a provider key"
+log "Model calls through Bifrost (mock provider, no API key needed)"
+response="$(probe_body "${json_post[@]}" -H "x-bf-vk: ${vk}" -d "$mock_body" "$BIFROST_CHAT")"
+assert_code "$(tail -n1 <<<"$response")" "200" "mock/mock-model via the dev virtual key"
+if grep -q '"mock reply: Reply with: ok"' <<<"$response"; then
+  pass "response came from the mock provider"
+else
+  fail "unexpected response: $(head -c 200 <<<"$response")"
+fi
+if grep -q '"total_tokens":[1-9]' <<<"$response"; then
+  pass "token usage reported"
+else
+  fail "no token usage in response"
+fi
+
+tool_body='{"model":"mock/mock-model","messages":[{"role":"user","content":"weather?"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{}}}}]}'
+response="$(probe_body "${json_post[@]}" -H "x-bf-vk: ${vk}" -d "$tool_body" "$BIFROST_CHAT")"
+if grep -q '"finish_reason":"tool_calls"' <<<"$response" && grep -q '"get_weather"' <<<"$response"; then
+  pass "tool call passed through Bifrost"
+else
+  fail "no tool call in response: $(head -c 200 <<<"$response")"
+fi
+
+found=0
+for _ in $(seq 1 15); do
+  if k get --raw "/api/v1/namespaces/observability/services/jaeger:16686/proxy/api/v3/services" 2>/dev/null \
+      | grep -q '"bifrost"'; then found=1; break; fi
+  sleep 2
+done
+if ((found)); then pass "Bifrost spans visible in Jaeger"; else fail "no Bifrost spans in Jaeger after 30s"; fi
+
+log "Real provider (optional)"
+if k -n bifrost get secret bifrost-provider-keys >/dev/null 2>&1; then
+  if k -n bifrost get secret bifrost-provider-keys -o jsonpath='{.data.ANTHROPIC_API_KEY}' | grep -q .; then
+    default_model="anthropic/claude-haiku-5-5"
   else
-    fail "virtual key not routed: $(head -c 200 <<<"$response")"
+    default_model="openai/gpt-4o-mini"
   fi
+  model="${SMOKE_MODEL:-$default_model}"
+  body="{\"model\":\"${model}\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":\"Reply with: ok\"}]}"
+  response="$(probe_body "${json_post[@]}" -H "x-bf-vk: ${vk}" -d "$body" "$BIFROST_CHAT")"
+  code="$(tail -n1 <<<"$response")"
   if [[ "$code" == "200" ]]; then
     pass "${model} answered (200)"
   elif grep -q 'authentication_error' <<<"$response"; then
-    fail "provider rejected the API key (expected with a dummy key; check ANTHROPIC_API_KEY/OPENAI_API_KEY)"
+    fail "provider rejected the API key (check ANTHROPIC_API_KEY/OPENAI_API_KEY)"
   else
     fail "${model} returned ${code}: $(head -c 200 <<<"$response") (set SMOKE_MODEL to a model your key can use)"
   fi
-  found=0
-  for _ in $(seq 1 15); do
-    if k get --raw "/api/v1/namespaces/observability/services/jaeger:16686/proxy/api/v3/services" 2>/dev/null \
-        | grep -q '"bifrost"'; then found=1; break; fi
-    sleep 2
-  done
-  if ((found)); then pass "Bifrost spans visible in Jaeger"; else fail "no Bifrost spans in Jaeger after 30s"; fi
 else
-  warn "skipped: no provider key configured"
+  warn "skipped: no ANTHROPIC_API_KEY or OPENAI_API_KEY configured"
 fi
 
 echo
