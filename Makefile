@@ -25,6 +25,7 @@ test: ## Unit tests (no cluster needed): mock LLM, echo agent, harness, declarat
 	@python3 -m unittest discover -s tools/echo-agent -q
 	@python3 -m unittest discover -s harness/claude-code -q
 	@python3 -m unittest discover -s runtime/declarative -q
+	@python3 -m unittest discover -s tools/oncall-mcp -q
 	@$(MAKE) -s operator-test
 
 operator-test: ## Operator unit + envtest tests, and lint

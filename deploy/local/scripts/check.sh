@@ -21,7 +21,7 @@ else
 fi
 
 log "Unit tests"
-for tool in tools/mock-llm tools/echo-agent harness/claude-code runtime/declarative; do
+for tool in tools/mock-llm tools/echo-agent tools/oncall-mcp harness/claude-code runtime/declarative; do
   if python3 -m unittest discover -s "${REPO_DIR}/${tool}" -q > "${tmp}/unittest.log" 2>&1; then
     ok "${tool} ($(grep -oE 'Ran [0-9]+ tests' "${tmp}/unittest.log"))"
   else
