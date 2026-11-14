@@ -1,17 +1,23 @@
 # Sample task for the payments-coder harness agent (agentory_v1alpha1_agent.yaml).
-# Today the operator resolves the agent and records its revision; execution
-# arrives with JobBackend (backlog item 7).
+# The operator starts one Job running Claude Code, then records the outcome in
+# status: phase, summary, changed files, token usage, cost and a traceId.
+#
+# With the local mock model, the [[tool:...]] directive makes the mock call
+# Claude Code's Bash tool, so the run deterministically creates a file. With a
+# real model, drop the directive and describe the work in plain language.
 apiVersion: agentory.dev/v1alpha1
 kind: Task
 metadata:
-  name: fix-flaky-test-8812
+  name: write-release-note
   labels:
     app.kubernetes.io/name: agentory-operator
 spec:
   agentRef:
     name: payments-coder
   input:
-    message: Fix the flaky test in ledger/settle_test.go
+    message: >-
+      Write RELEASE_NOTE.md summarising PAY-8812.
+      [[tool:Bash {"command": "echo '# PAY-8812: settle_test is no longer flaky' > RELEASE_NOTE.md", "description": "Write the release note"}]]
     data:
       issue: PAY-8812
-  timeout: 30m
+  timeout: 10m

@@ -36,7 +36,7 @@ var _ = Describe("CRD validation", func() {
 		a.Spec.Runtime = agentoryv1alpha1.RuntimeHarness
 		a.Spec.Lifecycle = agentoryv1alpha1.LifecyclePerTask
 		a.Spec.Declarative = nil
-		a.Spec.Harness = &agentoryv1alpha1.HarnessSpec{Kind: "claude-code"}
+		a.Spec.Harness = &agentoryv1alpha1.HarnessSpec{Kind: agentoryv1alpha1.HarnessKindClaudeCode}
 	}
 	container := func(a *agentoryv1alpha1.Agent) {
 		a.Spec.Runtime = agentoryv1alpha1.RuntimeContainer

@@ -1,8 +1,8 @@
 # Sample agents, one per runtime. All use the in-cluster mock model so they
 # work without an API key (deploy/local, `make up`).
 #
-# The container agent runs today; the declarative and harness agents are
-# validated and report Ready=False/BackendNotImplemented until items 7-8.
+# The container and harness agents run today; the declarative agent is
+# validated and reports Ready=False/BackendNotImplemented until item 8.
 
 # Type 3: declarative agent for non-developers (instructions + skills + MCP tools).
 apiVersion: agentory.dev/v1alpha1
@@ -53,7 +53,9 @@ spec:
     provider: mock
     name: mock-model
 ---
-# Type 1: coding harness, one pod per Task.
+# Type 1: coding harness. Runs today (JobBackend): each Task gets its own Job
+# running Claude Code headless, with this agent's virtual key and no ingress.
+# (harness.workspace, cloning a repo per Task, is backlog item 7a.)
 apiVersion: agentory.dev/v1alpha1
 kind: Agent
 metadata:
@@ -65,10 +67,6 @@ spec:
   lifecycle: perTask
   harness:
     kind: claude-code
-    workspace:
-      git:
-        url: https://github.com/example/payments.git
-        ref: main
   model:
     provider: mock
     name: mock-model

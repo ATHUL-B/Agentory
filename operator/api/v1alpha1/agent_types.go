@@ -167,6 +167,12 @@ type OCIArtifact struct {
 // +kubebuilder:validation:Enum=claude-code;codex
 type HarnessKind string
 
+// Harness kinds.
+const (
+	HarnessKindClaudeCode HarnessKind = "claude-code"
+	HarnessKindCodex      HarnessKind = "codex"
+)
+
 // HarnessSpec configures a coding harness agent.
 type HarnessSpec struct {
 	// Kind selects the harness.

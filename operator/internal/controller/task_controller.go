@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	batchv1 "k8s.io/api/batch/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -33,24 +34,34 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 )
 
-// TaskReconciler reconciles a Task object.
-//
-// Scope today (backlog item 3): resolve the referenced Agent and record its
-// revision. Starting work (JobBackend / A2A dispatch) and timeouts arrive with
-// the runtime backends in backlog items 4–8.
+// Task condition reasons.
+const (
+	ReasonAgentNotReady          = "AgentNotReady"
+	ReasonDispatchNotImplemented = "DispatchNotImplemented"
+	ReasonWorkloadCreated        = "WorkloadCreated"
+)
+
+// TaskReconciler reconciles a Task: once its Agent is Ready, it hands the Task
+// to the Agent's task backend (one Job per Task for harness agents) and copies
+// the workload's progress and result into the Task's status.
 type TaskReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Backends selects the runtime backend per Agent. Nil means none.
+	Backends *agentruntime.Registry
 }
 
 // +kubebuilder:rbac:groups=agentory.dev,resources=tasks,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentory.dev,resources=tasks/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentory.dev,resources=tasks/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents,verbs=get;list;watch
+// +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list
 
-// Reconcile brings a Task's status in line with its spec and its Agent.
+// Reconcile brings a Task's status in line with its spec, its Agent and its workload.
 func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -67,7 +78,10 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
-	desired := r.desiredStatus(&task, agent)
+	desired, err := r.desiredStatus(ctx, &task, agent)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
 	if equality.Semantic.DeepEqual(desired, &task.Status) {
 		return ctrl.Result{}, nil
 	}
@@ -92,49 +106,102 @@ func (r *TaskReconciler) lookupAgent(ctx context.Context, task *agentoryv1alpha1
 	return &agent, nil
 }
 
-func (r *TaskReconciler) desiredStatus(task *agentoryv1alpha1.Task, agent *agentoryv1alpha1.Agent) *agentoryv1alpha1.TaskStatus {
+func (r *TaskReconciler) desiredStatus(ctx context.Context, task *agentoryv1alpha1.Task,
+	agent *agentoryv1alpha1.Agent) (*agentoryv1alpha1.TaskStatus, error) {
 	status := task.Status.DeepCopy()
 	status.ObservedGeneration = task.Generation
 	if status.Phase == "" {
 		status.Phase = agentoryv1alpha1.TaskPhasePending
 	}
+	started := meta.IsStatusConditionTrue(status.Conditions, ConditionStarted)
 
 	if agent == nil {
-		status.AgentRevision = ""
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:               ConditionAgentResolved,
-			Status:             metav1.ConditionFalse,
-			Reason:             ReasonAgentNotFound,
-			Message:            fmt.Sprintf("agent %q not found in namespace %q", task.Spec.AgentRef.Name, task.Namespace),
-			ObservedGeneration: task.Generation,
-		})
-	} else {
+		if !started {
+			status.AgentRevision = ""
+		}
+		r.setCondition(status, task, ConditionAgentResolved, false, ReasonAgentNotFound,
+			fmt.Sprintf("agent %q not found in namespace %q", task.Spec.AgentRef.Name, task.Namespace))
+		if !started {
+			r.setCondition(status, task, ConditionStarted, false, ReasonAgentNotFound, "waiting for the agent to exist")
+		}
+		return status, nil
+	}
+	r.setCondition(status, task, ConditionAgentResolved, true, ReasonAgentFound, fmt.Sprintf("agent %q found", agent.Name))
+	// A Task records the revision it starts against; once started, that never changes.
+	if !started {
 		status.AgentRevision = agent.Status.Revision
-		meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-			Type:               ConditionAgentResolved,
-			Status:             metav1.ConditionTrue,
-			Reason:             ReasonAgentFound,
-			Message:            fmt.Sprintf("agent %q found", agent.Name),
-			ObservedGeneration: task.Generation,
-		})
 	}
 
+	backend, ok := r.Backends.TaskBackendFor(agent)
+	if !ok {
+		r.setCondition(status, task, ConditionStarted, false, ReasonDispatchNotImplemented,
+			fmt.Sprintf("no task runner for runtime=%s lifecycle=%s yet; service agents take work over A2A",
+				agent.Spec.Runtime, agent.Spec.Lifecycle))
+		return status, nil
+	}
+	if !started && !meta.IsStatusConditionTrue(agent.Status.Conditions, ConditionReady) {
+		msg := "waiting for the agent to be Ready"
+		if c := meta.FindStatusCondition(agent.Status.Conditions, ConditionReady); c != nil && c.Message != "" {
+			msg += ": " + c.Message
+		}
+		r.setCondition(status, task, ConditionStarted, false, ReasonAgentNotReady, msg)
+		return status, nil
+	}
+
+	rt, err := backend.EnsureTask(ctx, agent, task, agentruntime.Deps{Revision: status.AgentRevision})
+	if err != nil {
+		return nil, fmt.Errorf("starting task: %w", err)
+	}
+	r.applyRuntimeStatus(status, task, rt)
+	return status, nil
+}
+
+// applyRuntimeStatus copies a workload's progress and result into the Task status.
+func (r *TaskReconciler) applyRuntimeStatus(status *agentoryv1alpha1.TaskStatus, task *agentoryv1alpha1.Task,
+	rt agentruntime.TaskRuntimeStatus) {
+	if rt.Reason == agentruntime.ReasonResourceConflict {
+		status.Phase = agentoryv1alpha1.TaskPhaseFailed
+		r.setCondition(status, task, ConditionStarted, false, rt.Reason, rt.Message)
+		return
+	}
+	r.setCondition(status, task, ConditionStarted, true, ReasonWorkloadCreated, "workload "+rt.Workload)
+	status.Phase = rt.Phase
+	status.StartedAt = rt.StartedAt
+	status.CompletedAt = rt.CompletedAt
+
+	if res := rt.Result; res != nil {
+		status.TraceID = res.TraceID
+		status.Usage = &agentoryv1alpha1.TaskUsage{
+			InputTokens: res.Usage.InputTokens, OutputTokens: res.Usage.OutputTokens, CostUSD: res.Usage.CostUSD,
+		}
+		status.Result = &agentoryv1alpha1.TaskResult{Summary: res.Summary, Artifacts: res.Artifacts}
+	}
+	if rt.Phase.IsTerminal() {
+		r.setCondition(status, task, ConditionComplete, rt.Phase == agentoryv1alpha1.TaskPhaseSucceeded, rt.Reason, rt.Message)
+	} else if rt.Reason == agentruntime.ReasonImageProblem {
+		r.setCondition(status, task, ConditionComplete, false, rt.Reason, rt.Message)
+	} else {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionComplete)
+	}
+}
+
+func (r *TaskReconciler) setCondition(status *agentoryv1alpha1.TaskStatus, task *agentoryv1alpha1.Task,
+	conditionType string, ok bool, reason, message string) {
+	s := metav1.ConditionFalse
+	if ok {
+		s = metav1.ConditionTrue
+	}
 	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type:               ConditionStarted,
-		Status:             metav1.ConditionFalse,
-		Reason:             ReasonBackendNotImplemented,
-		Message:            "task execution arrives with the runtime backends (backlog items 4-8)",
-		ObservedGeneration: task.Generation,
+		Type: conditionType, Status: s, Reason: reason, Message: message, ObservedGeneration: task.Generation,
 	})
-	return status
 }
 
 // tasksForAgent maps an Agent event to the non-terminal Tasks that reference it,
-// so Tasks waiting on a missing or changed Agent are reconciled again.
+// so Tasks waiting on a missing or not-yet-Ready Agent are reconciled again.
 func (r *TaskReconciler) tasksForAgent(ctx context.Context, obj client.Object) []reconcile.Request {
 	var tasks agentoryv1alpha1.TaskList
 	if err := r.List(ctx, &tasks, client.InNamespace(obj.GetNamespace())); err != nil {
-		logf.FromContext(ctx).Error(err, "listing tasks for agent", "agent", obj.GetName())
+		logf.FromContext(ctx).Error(err, "Failed to list Tasks for Agent", "agent", obj.GetName())
 		return nil
 	}
 	var requests []reconcile.Request
@@ -152,6 +219,7 @@ func (r *TaskReconciler) tasksForAgent(ctx context.Context, obj client.Object) [
 func (r *TaskReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentoryv1alpha1.Task{}).
+		Owns(&batchv1.Job{}).
 		Watches(&agentoryv1alpha1.Agent{}, handler.EnqueueRequestsFromMapFunc(r.tasksForAgent)).
 		Named("task").
 		Complete(r)
