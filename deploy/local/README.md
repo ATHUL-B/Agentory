@@ -27,8 +27,10 @@ All pins live in [`versions.env`](versions.env).
 
 ## Prerequisites
 
-- Docker Desktop or OrbStack, running, with **at least 6 GB** of memory
-  assigned (8 GB+ recommended once agents are added).
+- A Docker engine with **at least 6 GB** of memory (8 GB+ once agents are
+  added). Tested with **Colima** (no admin rights needed):
+  `colima start --vm-type vz --cpu 6 --memory 8 --disk 60`. Docker Desktop or
+  OrbStack also work.
 - `kind` v0.33.0, `kubectl`, `helm` v3.17+ or v4, on `PATH`.
 - Optional for `make check`: `shellcheck`, `otelcol-contrib` 0.163.x.
 
@@ -69,11 +71,21 @@ curl -s localhost:8080/v1/chat/completions \
    - **can** reach Bifrost,
    - **cannot** reach `api.anthropic.com` directly,
    - **cannot** reach services that aren't on the allow-list (Jaeger).
-3. Bifrost rejects inference requests without a virtual key.
-4. A span sent to the collector shows up in Jaeger.
-5. With a provider key: a real model call through the dev virtual key returns
-   200 and produces a Bifrost trace. Override the model with
-   `SMOKE_MODEL=provider/model`.
+3. A span sent to the collector shows up in Jaeger.
+4. With a provider key configured:
+   - Bifrost rejects requests with **no** virtual key and with an **unknown**
+     one (401);
+   - the dev virtual key is accepted and routed to the provider key;
+   - the provider answers (200). With a dummy key this check fails with
+     "provider rejected the API key", which still proves everything up to the
+     provider works;
+   - Bifrost's own spans appear in Jaeger.
+
+   Override the model with `SMOKE_MODEL=provider/model`.
+
+Without a provider key, step 4 is skipped: Bifrost resolves the provider
+before it checks credentials, so with no provider every request is a 400 and
+auth can't be observed.
 
 ## UIs
 
@@ -90,11 +102,23 @@ is several GB of memory before any agent runs. Locally we use Jaeger. The
 collector is the only place that changes to export to Langfuse or MLflow, so
 agent code is unaffected. A Langfuse profile is backlog item 2b.
 
+## Gotchas found on the first real run
+
+| Symptom | Cause | Fix in this repo |
+|---|---|---|
+| `no matches for kind "Installation"` | Calico ≥ 3.32 ships its CRDs in a separate chart | `up.sh` applies `crd.projectcalico.org.v1` first |
+| `Secret "sh.helm.release.v1.calico-crds" … Too long` | Calico CRDs exceed Helm's 1 MiB release limit | CRDs rendered with `helm template` and server-side applied |
+| Calico upgrade conflicts on `.spec.calicoNetwork.ipPools` | Helm 4 server-side apply vs fields the operator owns | Calico is only (re)installed when the pinned version changes |
+| `deployments.apps "bifrost" not found` | With SQLite persistence the chart runs a StatefulSet | Scripts use `statefulset/bifrost` |
+| Edited virtual key has no effect after `make up` | Bifrost's default `split` mode keeps DB rows | `sourceOfTruth: config.json` |
+| `Model '…' is not allowed for virtual key` | `allow_all_providers` permits no models, and a key without `models` relies on a catalog lookup that fails for invalid keys | Explicit `provider_configs` with `allowed_models: ["*"]` and provider keys with `models: ["*"]` |
+| Jaeger `/api/services` returns 404 | Jaeger v2.22 serves the v3 query API | Smoke test uses `/api/v3/services` |
+
 ## Troubleshooting
 
 - **`make up` hangs on Calico:** the node stays `NotReady` until Calico is
   running. Check `kubectl --context kind-agentory -n calico-system get pods`.
-- **Bifrost `CrashLoopBackOff`:** run `kubectl -n bifrost logs deploy/bifrost`;
+- **Bifrost `CrashLoopBackOff`:** run `kubectl -n bifrost logs statefulset/bifrost`;
   a bad provider key format shows up there.
 - **Start over:** `make down && make up`. Generated keys survive unless
   `PURGE=1`.
