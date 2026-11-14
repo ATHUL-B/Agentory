@@ -416,6 +416,91 @@ else
   warn "skipped: operator or Gateway API not installed"
 fi
 
+log "Harness Tasks: Claude Code, one Job per Task (optional: make operator-up)"
+if k get crd tasks.agentory.dev >/dev/null 2>&1; then
+  e2e=agentory-e2e
+  k -n "$e2e" apply -f - >/dev/null <<EOF
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-coder }
+spec:
+  runtime: harness
+  lifecycle: perTask
+  harness: { kind: claude-code }
+  model: { provider: mock, name: mock-model }
+EOF
+  if k -n "$e2e" wait --for=condition=Ready agent/smoke-coder --timeout=120s >/dev/null 2>&1; then
+    pass "harness Agent Ready (virtual key, ServiceAccount, no-ingress NetworkPolicy)"
+    # The mock's [[tool:...]] directive makes it call Claude Code's Bash tool deterministically.
+    k -n "$e2e" apply -f - >/dev/null <<'EOF'
+apiVersion: agentory.dev/v1alpha1
+kind: Task
+metadata: { name: smoke-task-hello }
+spec:
+  agentRef: { name: smoke-coder }
+  input:
+    message: 'Create hello.txt. [[tool:Bash {"command": "echo hi > hello.txt", "description": "Create hello.txt"}]]'
+  timeout: 5m
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Task
+metadata: { name: smoke-task-timeout }
+spec:
+  agentRef: { name: smoke-coder }
+  input: { message: "This task cannot finish in one second." }
+  timeout: 1s
+EOF
+    task_field() { k -n "$e2e" get task "$1" -o jsonpath="$2" 2>/dev/null; }
+    for _ in $(seq 1 90); do
+      phase="$(task_field smoke-task-hello '{.status.phase}')"
+      [[ "$phase" == Succeeded || "$phase" == Failed ]] && break
+      sleep 2
+    done
+    if [[ "$phase" == Succeeded ]]; then
+      pass "Task Succeeded: Claude Code ran in a Job via the LLM gateway with the agent's key"
+    else
+      fail "Task ended ${phase:-unfinished}: $(task_field smoke-task-hello '{.status.conditions[?(@.type=="Complete")].message}')"
+    fi
+    if [[ "$(task_field smoke-task-hello '{.status.result.artifacts[*].ref}')" == *hello.txt* ]]; then
+      pass "Task result lists the file the harness created"
+    else
+      fail "hello.txt missing from the Task result"
+    fi
+    if [[ "$(task_field smoke-task-hello '{.status.usage.inputTokens}')" =~ ^[1-9] ]]; then
+      pass "Task records token usage ($(task_field smoke-task-hello '{.status.usage.inputTokens}') in / $(task_field smoke-task-hello '{.status.usage.outputTokens}') out)"
+    else
+      fail "Task has no token usage"
+    fi
+    trace="$(task_field smoke-task-hello '{.status.traceId}')"
+    if [[ -n "$trace" ]] && k get --raw "/api/v1/namespaces/observability/services/jaeger:16686/proxy/api/v3/traces/${trace}" 2>/dev/null \
+        | grep -q '"bifrost"'; then
+      pass "Task traceId links to the LLM gateway's spans in Jaeger"
+    else
+      fail "no Bifrost spans for trace '${trace}'"
+    fi
+
+    for _ in $(seq 1 60); do
+      [[ "$(task_field smoke-task-timeout '{.status.phase}')" == Failed ]] && break
+      sleep 2
+    done
+    assert_code "$(task_field smoke-task-timeout '{.status.conditions[?(@.type=="Complete")].reason}')" "Timeout" \
+      "a Task over its timeout fails with reason"
+
+    k -n "$e2e" delete task smoke-task-hello smoke-task-timeout --timeout=60s >/dev/null 2>&1
+    sleep 2
+    if k -n "$e2e" get job smoke-task-hello >/dev/null 2>&1; then
+      fail "Job left behind after deleting its Task"
+    else
+      pass "deleting a Task removed its Job"
+    fi
+  else
+    fail "harness Agent not Ready: $(k -n "$e2e" get agent smoke-coder -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')"
+  fi
+  k -n "$e2e" delete agent smoke-coder --ignore-not-found --wait=false >/dev/null
+else
+  warn "skipped: operator not deployed"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"

@@ -21,8 +21,8 @@ else
 fi
 
 log "Unit tests"
-for tool in mock-llm echo-agent; do
-  if python3 -m unittest discover -s "${REPO_DIR}/tools/${tool}" -q > "${tmp}/unittest.log" 2>&1; then
+for tool in tools/mock-llm tools/echo-agent harness/claude-code; do
+  if python3 -m unittest discover -s "${REPO_DIR}/${tool}" -q > "${tmp}/unittest.log" 2>&1; then
     ok "${tool} ($(grep -oE 'Ran [0-9]+ tests' "${tmp}/unittest.log"))"
   else
     fail "${tool} unit tests: $(tail -5 "${tmp}/unittest.log")"
