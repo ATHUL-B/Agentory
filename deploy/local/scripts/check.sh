@@ -26,13 +26,14 @@ render_chart() {  # name, chart, version, values...
   local name="$1" chart="$2" version="$3"; shift 3
   local args=() v
   for v in "$@"; do args+=(-f "$v"); done
-  if helm template "$name" "$chart" --version "$version" "${args[@]}" > "${tmp}/${name}.yaml" 2> "${tmp}/${name}.err"; then
+  if helm template "$name" "$chart" --version "$version" ${args[@]+"${args[@]}"} > "${tmp}/${name}.yaml" 2> "${tmp}/${name}.err"; then
     ok "$name"
   else
     fail "$name: $(tail -3 "${tmp}/${name}.err")"
   fi
 }
 ANTHROPIC_API_KEY=dummy OPENAI_API_KEY=dummy bifrost_generated_values "sk-bf-check" > "${tmp}/bifrost-generated.yaml"
+render_chart calico-crds projectcalico/crd.projectcalico.org.v1 "${CALICO_CHART_VERSION}"
 render_chart calico projectcalico/tigera-operator "${CALICO_CHART_VERSION}" "${LOCAL_DIR}/values/calico.yaml"
 render_chart agentgateway oci://cr.agentgateway.dev/charts/agentgateway "${AGENTGATEWAY_CHART_VERSION}" "${LOCAL_DIR}/values/agentgateway.yaml"
 render_chart otel-collector open-telemetry/opentelemetry-collector "${OTEL_COLLECTOR_CHART_VERSION}" "${LOCAL_DIR}/values/otel-collector.yaml"
@@ -44,6 +45,7 @@ log "Rendered output matches what the manifests expect"
 expect() {  # file, pattern, description
   if grep -qE "$2" "${tmp}/$1"; then ok "$3"; else fail "$3 (pattern '$2' not found in $1)"; fi
 }
+expect calico-crds.yaml 'name: installations.operator.tigera.io' "Calico CRD chart provides the Installation CRD the operator chart needs"
 expect otel-collector.yaml 'app.kubernetes.io/name: opentelemetry-collector' "collector pods carry the label the smoke NetworkPolicy selects"
 expect otel-collector.yaml 'name: otel-collector$' "collector Service is named otel-collector"
 expect otel-collector.yaml 'otlp_grpc/jaeger' "collector exports traces to Jaeger"
