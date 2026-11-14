@@ -20,19 +20,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	"github.com/ATHUL-B/Agentory/operator/internal/ownership"
 )
 
 // Condition reasons reported by DeploymentBackend.
@@ -43,6 +41,7 @@ const (
 )
 
 const (
+	agentCardVolume    = "agent-card"
 	containerName      = "agent"
 	portName           = "a2a"
 	defaultServingPort = int32(8080)
@@ -51,7 +50,7 @@ const (
 
 // ErrNotOwned means an object with the name the backend needs already exists
 // and is not controlled by the Agent. The backend never adopts such objects.
-var ErrNotOwned = errors.New("exists and is not managed by this Agent")
+var ErrNotOwned = ownership.ErrNotOwned
 
 // DeploymentBackend runs long-lived container agents (runtime "container",
 // lifecycle "service") as a Deployment, Service, ServiceAccount and NetworkPolicy,
@@ -108,31 +107,14 @@ func (b *DeploymentBackend) EnsureAgent(ctx context.Context, agent *agentoryv1al
 
 	status := deploymentStatus(deploy)
 	status.InternalEndpoint = fmt.Sprintf("http://%s.%s.svc.%s:%d", agent.Name, agent.Namespace, b.Env.Config.ClusterDomain, port)
+	status.ServingPort = port
 	return status, nil
 }
 
 // ensure creates or updates obj, owned by the Agent, refusing to take over an
 // object someone else created.
 func (b *DeploymentBackend) ensure(ctx context.Context, owner *agentoryv1alpha1.Agent, obj client.Object, mutate func()) error {
-	existing, ok := obj.DeepCopyObject().(client.Object)
-	if !ok {
-		return fmt.Errorf("unexpected object type %T", obj)
-	}
-	switch err := b.Client.Get(ctx, client.ObjectKeyFromObject(obj), existing); {
-	case apierrors.IsNotFound(err):
-	case err != nil:
-		return err
-	case !metav1.IsControlledBy(existing, owner):
-		kind := fmt.Sprintf("%T", obj)
-		return fmt.Errorf("%s %s/%s %w", kind, obj.GetNamespace(), obj.GetName(), ErrNotOwned)
-	}
-
-	_, err := controllerutil.CreateOrUpdate(ctx, b.Client, obj, func() error {
-		obj.SetLabels(mergeLabels(obj.GetLabels(), ObjectLabels(owner)))
-		mutate()
-		return controllerutil.SetControllerReference(owner, obj, b.Scheme)
-	})
-	return err
+	return ownership.Ensure(ctx, b.Client, b.Scheme, owner, obj, ObjectLabels(owner), mutate)
 }
 
 func (b *DeploymentBackend) mutateService(svc *corev1.Service, agent *agentoryv1alpha1.Agent, port int32) {
@@ -154,7 +136,7 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 	d.Spec.Selector = &metav1.LabelSelector{MatchLabels: SelectorLabels(agent)}
 
 	tpl := &d.Spec.Template
-	tpl.Labels = mergeLabels(tpl.Labels, ObjectLabels(agent))
+	tpl.Labels = ownership.MergeLabels(tpl.Labels, ObjectLabels(agent))
 	if tpl.Annotations == nil {
 		tpl.Annotations = map[string]string{}
 	}
@@ -174,6 +156,17 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 
+	// The generated A2A card, mounted as a directory (not subPath) so updates
+	// reach running pods without a restart.
+	spec.Volumes = []corev1.Volume{{
+		Name: agentCardVolume,
+		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+			LocalObjectReference: corev1.LocalObjectReference{Name: AgentCardConfigMapName(agent)},
+			Optional:             new(true),
+			DefaultMode:          mergeDefaultMode(spec.Volumes),
+		}},
+	}}
+
 	container := b.container(agent, deps.Revision, port)
 	if len(spec.Containers) == 1 && spec.Containers[0].Name == containerName {
 		// Mutate in place so fields the API server defaulted are kept and
@@ -185,6 +178,7 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 		existing.Resources = container.Resources
 		existing.ReadinessProbe = mergeProbe(existing.ReadinessProbe, container.ReadinessProbe)
 		existing.SecurityContext = container.SecurityContext
+		existing.VolumeMounts = container.VolumeMounts
 	} else {
 		spec.Containers = []corev1.Container{container}
 	}
@@ -211,6 +205,9 @@ func (b *DeploymentBackend) container(agent *agentoryv1alpha1.Agent, revision st
 		Ports:     []corev1.ContainerPort{{Name: portName, ContainerPort: port, Protocol: corev1.ProtocolTCP}},
 		Env:       env,
 		Resources: resources,
+		VolumeMounts: []corev1.VolumeMount{{
+			Name: agentCardVolume, MountPath: AgentCardMountPath, ReadOnly: true,
+		}},
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)}},
 			PeriodSeconds: 5,
@@ -234,6 +231,17 @@ func mergeProbe(existing, desired *corev1.Probe) *corev1.Probe {
 	return merged
 }
 
+// mergeDefaultMode keeps the API server's defaulted file mode for the card
+// volume, so reconciles converge without a write.
+func mergeDefaultMode(existing []corev1.Volume) *int32 {
+	for _, v := range existing {
+		if v.Name == agentCardVolume && v.ConfigMap != nil {
+			return v.ConfigMap.DefaultMode
+		}
+	}
+	return nil
+}
+
 func deploymentStatus(d *appsv1.Deployment) AgentRuntimeStatus {
 	want := int32(1)
 	if d.Spec.Replicas != nil {
@@ -254,11 +262,4 @@ func servingPort(agent *agentoryv1alpha1.Agent) int32 {
 		return agent.Spec.Container.Port
 	}
 	return defaultServingPort
-}
-
-func mergeLabels(existing, add map[string]string) map[string]string {
-	out := make(map[string]string, len(existing)+len(add))
-	maps.Copy(out, existing)
-	maps.Copy(out, add)
-	return out
 }
