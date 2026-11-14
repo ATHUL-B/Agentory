@@ -1,8 +1,8 @@
 # Sample agents, one per runtime. All use the in-cluster mock model so they
 # work without an API key (deploy/local, `make up`).
 #
-# Today the operator validates these, records a revision and reports
-# Ready=False/BackendNotImplemented; workloads arrive in backlog items 4-8.
+# The container agent runs today; the declarative and harness agents are
+# validated and report Ready=False/BackendNotImplemented until items 7-8.
 
 # Type 3: declarative agent for non-developers (instructions + skills + MCP tools).
 apiVersion: agentory.dev/v1alpha1
@@ -29,7 +29,10 @@ spec:
   a2a:
     allowedCallers: ["team-sre/*"]
 ---
-# Type 2: your own (multi-)agent container.
+# Type 2: your own (multi-)agent container. Runs today (DeploymentBackend):
+# the operator creates a Deployment, Service, ServiceAccount and a locked-down
+# NetworkPolicy, and injects the gateway environment (AGENTORY_*, OPENAI_BASE_URL, ...).
+# nginx is a stand-in that serves on 8080; use your own A2A server image.
 apiVersion: agentory.dev/v1alpha1
 kind: Agent
 metadata:
@@ -40,9 +43,12 @@ spec:
   runtime: container
   lifecycle: service
   container:
-    image: ghcr.io/example/research-crew:1.0.0
+    image: nginxinc/nginx-unprivileged:1.31.7
     port: 8080
     protocol: a2a
+    env:
+      - name: LOG_LEVEL
+        value: info
   model:
     provider: mock
     name: mock-model
