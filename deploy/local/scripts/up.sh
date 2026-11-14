@@ -66,6 +66,16 @@ h upgrade --install otel-collector open-telemetry/opentelemetry-collector \
 k -n observability rollout status deploy/jaeger --timeout=5m >/dev/null
 ok "collector and Jaeger running"
 
+log "Mock LLM (provider \"mock\", no API key needed)"
+k create namespace mock-llm --dry-run=client -o yaml | k apply -f - >/dev/null
+k -n mock-llm create configmap mock-llm-code --from-file="${REPO_DIR}/tools/mock-llm/mock_llm.py" \
+  --dry-run=client -o yaml | k apply -f - >/dev/null
+render "${LOCAL_DIR}/manifests/mock-llm.yaml" | k apply -f - >/dev/null
+# Restart so code changes in the ConfigMap are picked up on re-runs.
+k -n mock-llm rollout restart deploy/mock-llm >/dev/null
+k -n mock-llm rollout status deploy/mock-llm --timeout=3m >/dev/null
+ok "running"
+
 log "Bifrost ${BIFROST_CHART_VERSION} (LLM gateway)"
 k create namespace bifrost --dry-run=client -o yaml | k apply -f - >/dev/null
 
@@ -87,7 +97,7 @@ if ((${#provider_args[@]})); then
 else
   # Remove keys from a previous run so the cluster matches this invocation.
   k -n bifrost delete secret bifrost-provider-keys --ignore-not-found >/dev/null
-  warn "No ANTHROPIC_API_KEY or OPENAI_API_KEY set: Bifrost starts without providers (model calls will fail)."
+  warn "No ANTHROPIC_API_KEY or OPENAI_API_KEY set: only the mock provider (mock/mock-model) is available."
 fi
 
 bifrost_generated_values "$(cat "${SECRETS_DIR}/dev-virtual-key")" > "${SECRETS_DIR}/bifrost-generated.yaml"
@@ -108,5 +118,6 @@ Local cluster is up (context: ${KUBE_CONTEXT}).
   Jaeger UI:      kubectl --context ${KUBE_CONTEXT} -n observability port-forward svc/jaeger 16686  → http://localhost:16686
   Bifrost UI:     kubectl --context ${KUBE_CONTEXT} -n bifrost port-forward svc/bifrost 8080       → http://localhost:8080
   Dev virtual key: ${SECRETS_DIR}/dev-virtual-key
+  Mock model:     mock/mock-model (deterministic, no API key)
   Tear down:      make down
 EOF
