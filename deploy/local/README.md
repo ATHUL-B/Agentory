@@ -1,14 +1,15 @@
 # Local dev cluster
 
 A single-node kind cluster with the Agentory data plane: the LLM gateway
-(Bifrost), the agent gateway (agentgateway), and tracing (OTel collector →
-Jaeger), plus Calico so agent egress lockdown is actually enforced
-(ADR-0002).
+(Bifrost), the agent gateway (agentgateway), tracing (OTel collector →
+Jaeger), a deterministic **mock LLM** so nothing needs an API key, and Calico
+so agent egress lockdown is actually enforced (ADR-0002).
 
 ```
 make up      # create or update the cluster (idempotent)
 make smoke   # end-to-end checks against the running cluster
-make check   # static checks, no Docker needed
+make check   # static checks + unit tests, no Docker needed
+make test    # unit tests only
 make down    # delete the cluster (PURGE=1 also deletes generated keys)
 ```
 
@@ -22,6 +23,7 @@ make down    # delete the cluster (PURGE=1 also deletes generated keys)
 | `observability` | OTel collector (contrib) | chart `0.178.0` | Receives OTLP from gateways and agents |
 | `observability` | Jaeger all-in-one | `2.22.0` | Local trace viewer (in-memory) |
 | `bifrost` | Bifrost | chart `2.1.45`, image `v2.3.1` | LLM gateway, virtual keys, cost, OTel spans |
+| `mock-llm` | [Mock LLM](../../tools/mock-llm/README.md) | `python:3.12.12-slim` | Provider `mock`: model `mock/mock-model`, deterministic replies and tool calls |
 
 All pins live in [`versions.env`](versions.env).
 
@@ -38,8 +40,11 @@ With Homebrew: `brew install kind kubectl helm shellcheck`.
 
 ## Model provider keys
 
+**No key is needed.** The `mock` provider (model `mock/mock-model`) is always
+configured, so every check, and later every agent, can run without one.
+
 Bifrost holds the provider keys; agents only ever get a Bifrost **virtual key**.
-Export a key before `make up` to enable real model calls:
+To add a real provider as well, export its key before `make up`:
 
 ```bash
 export ANTHROPIC_API_KEY=...   # and/or OPENAI_API_KEY=...
@@ -48,8 +53,7 @@ make up
 
 The key is stored in the `bifrost/bifrost-provider-keys` Secret and referenced
 from Bifrost's config as `env.ANTHROPIC_API_KEY`. It is never written to the
-repo. Without a key, everything still comes up and `make smoke` skips the
-model-call check.
+repo. Re-running `make up` without the variable removes the Secret again.
 
 `make up` also generates, once, into `deploy/local/.secrets/` (git-ignored):
 
@@ -61,7 +65,7 @@ kubectl --context kind-agentory -n bifrost port-forward svc/bifrost 8080 &
 curl -s localhost:8080/v1/chat/completions \
   -H "x-bf-vk: $(cat deploy/local/.secrets/dev-virtual-key)" \
   -H 'Content-Type: application/json' \
-  -d '{"model":"anthropic/claude-haiku-5-5","messages":[{"role":"user","content":"hi"}]}'
+  -d '{"model":"mock/mock-model","messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## What `make smoke` checks
@@ -71,21 +75,14 @@ curl -s localhost:8080/v1/chat/completions \
    - **can** reach Bifrost,
    - **cannot** reach `api.anthropic.com` directly,
    - **cannot** reach services that aren't on the allow-list (Jaeger).
-3. A span sent to the collector shows up in Jaeger.
-4. With a provider key configured:
-   - Bifrost rejects requests with **no** virtual key and with an **unknown**
-     one (401);
-   - the dev virtual key is accepted and routed to the provider key;
-   - the provider answers (200). With a dummy key this check fails with
-     "provider rejected the API key", which still proves everything up to the
-     provider works;
-   - Bifrost's own spans appear in Jaeger.
-
-   Override the model with `SMOKE_MODEL=provider/model`.
-
-Without a provider key, step 4 is skipped: Bifrost resolves the provider
-before it checks credentials, so with no provider every request is a 400 and
-auth can't be observed.
+3. Bifrost rejects requests with **no** virtual key and with an **unknown**
+   one (401).
+4. A span sent to the collector shows up in Jaeger.
+5. Through the dev virtual key, `mock/mock-model` answers (200) with the mock's
+   reply and token usage, a tool call passes through intact, and Bifrost's
+   spans appear in Jaeger.
+6. Only with a real provider key: that provider answers (200). Override the
+   model with `SMOKE_MODEL=provider/model`.
 
 ## UIs
 
@@ -113,6 +110,8 @@ agent code is unaffected. A Langfuse profile is backlog item 2b.
 | Edited virtual key has no effect after `make up` | Bifrost's default `split` mode keeps DB rows | `sourceOfTruth: config.json` |
 | `Model '…' is not allowed for virtual key` | `allow_all_providers` permits no models, and a key without `models` relies on a catalog lookup that fails for invalid keys | Explicit `provider_configs` with `allowed_models: ["*"]` and provider keys with `models: ["*"]` |
 | Jaeger `/api/services` returns 404 | Jaeger v2.22 serves the v3 query API | Smoke test uses `/api/v3/services` |
+| 400 for every request, even with no key | With no provider configured, Bifrost fails on provider resolution before auth | The mock provider is always configured |
+| `could not auto resolve a provider` | Model given without a provider prefix | Use `provider/model`, e.g. `mock/mock-model` |
 
 ## Troubleshooting
 

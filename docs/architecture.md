@@ -87,6 +87,7 @@ takes action under an approval policy that teams can trust.
 | **Agent gateway** | A2A routing between agents, MCP proxy/tool filtering, JWT policy | Reused: **agentgateway** |
 | **OTel collector** | Receives spans, fans out to the configured sink | Reused: OpenTelemetry Collector |
 | **Trace sink** | LLM traces, cost, evaluation | Reused: **Langfuse** (default) or **MLflow** |
+| **Mock LLM** | Deterministic OpenAI-compatible provider (`mock/mock-model`) behind Bifrost, for local dev and CI without API keys | Built ([`tools/mock-llm`](../tools/mock-llm/README.md)) |
 
 ## 5. Agent types
 
