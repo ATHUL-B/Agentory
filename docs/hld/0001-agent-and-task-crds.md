@@ -387,6 +387,12 @@ projected ServiceAccount tokens. Actor-chain JWTs are backlog.
 - **End-to-end:** kind cluster (Calico) with Bifrost, agentgateway, OTel
   collector, Langfuse and a mock LLM provider so CI needs no real API key.
   Scenarios: one per agent type, egress denial, cross-agent trace.
+- **Demo (item 9, implemented):** `make demo` (`demo/run.sh`) runs those four
+  scenarios as one on-call story in namespace `team-payments`, and checks each
+  step, so it doubles as an end-to-end test. The BYO multi-agent example is
+  `examples/incident-commander`. The declarative runtime now emits an
+  `execute_tool <name>` span (OTel GenAI conventions) per tool call, so tool
+  use shows up in the trace.
 
 ## 10. Risks and open questions
 

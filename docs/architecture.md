@@ -88,6 +88,7 @@ takes action under an approval policy that teams can trust.
 | **OTel collector** | Receives spans, fans out to the configured sink | Reused: OpenTelemetry Collector |
 | **Trace sink** | LLM traces, cost, evaluation | Reused: **Langfuse** (default) or **MLflow** |
 | **MCP registry** | `MCPServer` resources that Agents reference by name; per-Agent tool routes and allow-lists on the agent gateway | Built (operator) |
+| **Demo** | `make demo`: the four scenarios as one on-call incident, self-checking; includes a BYO multi-agent example | Built ([`demo/`](../demo/README.md), [`examples/incident-commander`](../examples/incident-commander/README.md)) |
 | **Mock LLM** | Deterministic OpenAI-compatible provider (`mock/mock-model`) behind Bifrost, for local dev and CI without API keys | Built ([`tools/mock-llm`](../tools/mock-llm/README.md)) |
 
 ## 5. Agent types
