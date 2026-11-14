@@ -79,7 +79,7 @@ func (b *DeploymentBackend) Supports(agent *agentoryv1alpha1.Agent) bool {
 }
 
 // EnsureAgent implements Backend.
-func (b *DeploymentBackend) EnsureAgent(ctx context.Context, agent *agentoryv1alpha1.Agent, revision string) (AgentRuntimeStatus, error) {
+func (b *DeploymentBackend) EnsureAgent(ctx context.Context, agent *agentoryv1alpha1.Agent, deps Deps) (AgentRuntimeStatus, error) {
 	port := servingPort(agent)
 	meta := func() metav1.ObjectMeta { return metav1.ObjectMeta{Name: agent.Name, Namespace: agent.Namespace} }
 
@@ -95,7 +95,7 @@ func (b *DeploymentBackend) EnsureAgent(ctx context.Context, agent *agentoryv1al
 		{sa, func() { sa.AutomountServiceAccountToken = new(false) }},
 		{policy, func() { policy.Spec = b.Policy.Build(agent, port) }},
 		{svc, func() { b.mutateService(svc, agent, port) }},
-		{deploy, func() { b.mutateDeployment(deploy, agent, revision, port) }},
+		{deploy, func() { b.mutateDeployment(deploy, agent, deps, port) }},
 	}
 	for _, step := range steps {
 		if err := b.ensure(ctx, agent, step.obj, step.mutate); err != nil {
@@ -147,7 +147,7 @@ func (b *DeploymentBackend) mutateService(svc *corev1.Service, agent *agentoryv1
 	}}
 }
 
-func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agentoryv1alpha1.Agent, revision string, port int32) {
+func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agentoryv1alpha1.Agent, deps Deps, port int32) {
 	if d.Spec.Replicas == nil {
 		d.Spec.Replicas = new(int32(1))
 	}
@@ -158,7 +158,12 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 	if tpl.Annotations == nil {
 		tpl.Annotations = map[string]string{}
 	}
-	tpl.Annotations[AnnotationRevision] = revision
+	tpl.Annotations[AnnotationRevision] = deps.Revision
+	if deps.VirtualKeyID != "" {
+		tpl.Annotations[AnnotationVirtualKeyID] = deps.VirtualKeyID
+	} else {
+		delete(tpl.Annotations, AnnotationVirtualKeyID)
+	}
 
 	spec := &tpl.Spec
 	spec.ServiceAccountName = agent.Name
@@ -169,7 +174,7 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
 
-	container := b.container(agent, revision, port)
+	container := b.container(agent, deps.Revision, port)
 	if len(spec.Containers) == 1 && spec.Containers[0].Name == containerName {
 		// Mutate in place so fields the API server defaulted are kept and
 		// reconciles converge without a write.

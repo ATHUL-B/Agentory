@@ -61,6 +61,10 @@ repo. Re-running `make up` without the variable removes the Secret again.
 `make up` also generates, once, into `deploy/local/.secrets/` (git-ignored):
 
 - `bifrost-encryption-key`: Bifrost's encryption key
+- `bifrost-admin-password`: password of Bifrost's `admin` user. It locks the
+  management API and dashboard, and `make operator-up` hands it to the operator
+  (Secret `agentory-operator-system/llm-gateway-admin`) to manage per-agent keys.
+  Model calls don't use it: they need only a virtual key.
 - `dev-virtual-key`: a virtual key (`vk-agentory-dev`) for manual testing:
 
 ```bash
@@ -94,6 +98,11 @@ curl -s localhost:8080/v1/chat/completions \
    set, Bifrost is reachable, and `api.anthropic.com` and other services are
    blocked; the pod accepts traffic from the agent gateway's namespace and
    rejects it from other namespaces.
+9. Only after `make operator-up`: Bifrost's management API rejects calls
+   without admin credentials; an Agent gets its own key (Secret
+   `<agent>-llm`); its pod calls `mock/mock-model` with the injected key (200)
+   and is refused any other model (403); a key deleted in Bifrost is
+   re-created and the pod restarts with it; deleting the Agent deletes its key.
 
 ## UIs
 
@@ -118,7 +127,8 @@ agent code is unaffected. A Langfuse profile is backlog item 2b.
 | `Secret "sh.helm.release.v1.calico-crds" … Too long` | Calico CRDs exceed Helm's 1 MiB release limit | CRDs rendered with `helm template` and server-side applied |
 | Calico upgrade conflicts on `.spec.calicoNetwork.ipPools` | Helm 4 server-side apply vs fields the operator owns | Calico is only (re)installed when the pinned version changes |
 | `deployments.apps "bifrost" not found` | With SQLite persistence the chart runs a StatefulSet | Scripts use `statefulset/bifrost` |
-| Edited virtual key has no effect after `make up` | Bifrost's default `split` mode keeps DB rows | `sourceOfTruth: config.json` |
+| Virtual keys created through the API vanish when Bifrost restarts | `sourceOfTruth: config.json` deletes, at start-up, every DB row of a section present in the file | Keep the default `split` mode (an earlier version of this table wrongly recommended `config.json`) |
+| `/api` returns 401, or "No admin account is configured" in the logs | The management API is locked until an admin exists | `authConfig` with the generated admin password; `disableAuthOnInference` keeps model calls virtual-key-only |
 | `Model '…' is not allowed for virtual key` | `allow_all_providers` permits no models, and a key without `models` relies on a catalog lookup that fails for invalid keys | Explicit `provider_configs` with `allowed_models: ["*"]` and provider keys with `models: ["*"]` |
 | Jaeger `/api/services` returns 404 | Jaeger v2.22 serves the v3 query API | Smoke test uses `/api/v3/services` |
 | 400 for every request, even with no key | With no provider configured, Bifrost fails on provider resolution before auth | The mock provider is always configured |

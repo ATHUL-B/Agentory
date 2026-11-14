@@ -17,6 +17,8 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
@@ -29,7 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	gatewayfake "github.com/ATHUL-B/Agentory/operator/internal/llmgateway/fake"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
+	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 )
 
 var _ = Describe("Agent controller", func() {
@@ -180,6 +184,98 @@ var _ = Describe("Agent controller", func() {
 
 			ready := meta.FindStatusCondition(reconcileAgent(agent).Status.Conditions, ConditionReady)
 			Expect(ready.Reason).To(Equal(ReasonBackendNotImplemented))
+		})
+	})
+
+	Context("with virtual keys", func() {
+		var gw *gatewayfake.Gateway
+
+		BeforeEach(func() {
+			gw = gatewayfake.New()
+			reconciler.VirtualKeys = &virtualkey.Manager{Client: k8sClient, Scheme: k8sClient.Scheme(), Gateway: gw}
+			reconciler.Backends = agentruntime.NewRegistry(
+				agentruntime.NewDeploymentBackend(k8sClient, k8sClient.Scheme(), agentruntime.DefaultGatewayConfig()))
+		})
+
+		// reconcileUntilStable runs the reconciler until it stops changing the
+		// Agent (the first pass only adds the finalizer).
+		reconcileUntilStable := func(agent *agentoryv1alpha1.Agent) *agentoryv1alpha1.Agent {
+			var got *agentoryv1alpha1.Agent
+			for range 3 {
+				got = reconcileAgent(agent)
+			}
+			return got
+		}
+
+		It("creates a key, stores it in the Agent's Secret and stamps the pods", func() {
+			agent := newDeclarativeAgent(uniqueName("keyed"), func(a *agentoryv1alpha1.Agent) {
+				a.Spec.Runtime = agentoryv1alpha1.RuntimeContainer
+				a.Spec.Declarative = nil
+				a.Spec.Container = &agentoryv1alpha1.ContainerSpec{Image: "ghcr.io/example/crew:1.0.0"}
+			})
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			got := reconcileUntilStable(agent)
+			Expect(got.Finalizers).To(ContainElement(FinalizerVirtualKey))
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionVirtualKeyReady)).To(BeTrue())
+			Expect(got.Status.VirtualKeyRef).To(Equal(&corev1.LocalObjectReference{Name: agent.Name + "-llm"}))
+			Expect(gw.Len()).To(Equal(1))
+
+			var secret corev1.Secret
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: testNamespace, Name: agent.Name + "-llm"}, &secret)).To(Succeed())
+			Expect(secret.Data).To(HaveKey(agentruntime.VirtualKeySecretKey))
+			keyID := secret.Annotations[virtualkey.AnnotationKeyID]
+
+			var deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Annotations).To(HaveKeyWithValue(agentruntime.AnnotationVirtualKeyID, keyID))
+
+			By("deleting the Agent, the key is deleted from the gateway and the finalizer released")
+			Expect(k8sClient.Delete(ctx, got)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(gw.Len()).To(Equal(0))
+			err = k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &agentoryv1alpha1.Agent{})
+			Expect(client.IgnoreNotFound(err)).To(Succeed())
+			Expect(err).To(HaveOccurred(), "agent should be gone once the finalizer is removed")
+		})
+
+		It("reports a gateway outage in status and retries", func() {
+			agent := newDeclarativeAgent(uniqueName("outage"))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(func() {
+				gw.Err = nil
+				Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, agent))).To(Succeed())
+				_, _ = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			})
+			reconcileAgent(agent) // adds the finalizer
+
+			gw.Err = errors.New("connection refused")
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			Expect(err).To(HaveOccurred(), "the reconcile must be retried")
+
+			var got agentoryv1alpha1.Agent
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &got)).To(Succeed())
+			cond := meta.FindStatusCondition(got.Status.Conditions, ConditionVirtualKeyReady)
+			Expect(cond).NotTo(BeNil())
+			Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+			Expect(cond.Reason).To(Equal(virtualkey.ReasonGatewayError))
+			Expect(cond.Message).To(ContainSubstring("connection refused"))
+		})
+
+		It("releases a deleted Agent without cleanup when key management is turned off", func() {
+			agent := newDeclarativeAgent(uniqueName("orphaned"))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			got := reconcileUntilStable(agent)
+			Expect(got.Finalizers).To(ContainElement(FinalizerVirtualKey))
+
+			reconciler.VirtualKeys = nil
+			Expect(k8sClient.Delete(ctx, got)).To(Succeed())
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			Expect(err).NotTo(HaveOccurred())
+			err = k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &agentoryv1alpha1.Agent{})
+			Expect(err).To(HaveOccurred(), "agent must not be stuck on the finalizer")
+			Expect(gw.Len()).To(Equal(1), "the key is left for an operator with credentials to clean up")
 		})
 	})
 })

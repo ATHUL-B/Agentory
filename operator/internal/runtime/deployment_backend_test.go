@@ -65,7 +65,7 @@ func TestEnsureAgentCreatesOwnedResources(t *testing.T) {
 	})
 	b, c := newBackend(t, agent)
 
-	status, err := b.EnsureAgent(context.Background(), agent, testAgent+"-rev1")
+	status, err := b.EnsureAgent(context.Background(), agent, Deps{Revision: testAgent + "-rev1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,19 +123,19 @@ func TestEnsureAgentIsIdempotent(t *testing.T) {
 	agent := containerAgent()
 	b, c := newBackend(t, agent)
 	ctx := context.Background()
-	if _, err := b.EnsureAgent(ctx, agent, testAgent+"-rev1"); err != nil {
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: testAgent + "-rev1"}); err != nil {
 		t.Fatal(err)
 	}
 	before := get(t, c, &appsv1.Deployment{}).ResourceVersion
 
-	if _, err := b.EnsureAgent(ctx, agent, testAgent+"-rev1"); err != nil {
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: testAgent + "-rev1"}); err != nil {
 		t.Fatal(err)
 	}
 	if after := get(t, c, &appsv1.Deployment{}).ResourceVersion; after != before {
 		t.Errorf("second EnsureAgent rewrote the deployment (%s -> %s)", before, after)
 	}
 
-	if _, err := b.EnsureAgent(ctx, agent, testAgent+"-rev2"); err != nil {
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: testAgent + "-rev2"}); err != nil {
 		t.Fatal(err)
 	}
 	d := get(t, c, &appsv1.Deployment{})
@@ -148,7 +148,7 @@ func TestEnsureAgentReportsReadyWhenAvailable(t *testing.T) {
 	agent := containerAgent()
 	b, c := newBackend(t, agent)
 	ctx := context.Background()
-	if _, err := b.EnsureAgent(ctx, agent, "r"); err != nil {
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: "r"}); err != nil {
 		t.Fatal(err)
 	}
 	d := get(t, c, &appsv1.Deployment{})
@@ -167,7 +167,7 @@ func TestEnsureAgentReportsReadyWhenAvailable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status, err := b.EnsureAgent(ctx, agent, "r")
+	status, err := b.EnsureAgent(ctx, agent, Deps{Revision: "r"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestEnsureAgentRefusesToAdoptForeignObjects(t *testing.T) {
 	agent := containerAgent()
 	b, c := newBackend(t, agent, foreign)
 
-	status, err := b.EnsureAgent(context.Background(), agent, "r")
+	status, err := b.EnsureAgent(context.Background(), agent, Deps{Revision: "r"})
 	if err != nil {
 		t.Fatalf("conflict must be reported in status, not as an error: %v", err)
 	}
@@ -197,11 +197,38 @@ func TestEnsureAgentRefusesToAdoptForeignObjects(t *testing.T) {
 func TestEnsureAgentPrivilegedPortAddsBindCapability(t *testing.T) {
 	agent := containerAgent(func(a *agentoryv1alpha1.Agent) { a.Spec.Container.Port = 80 })
 	b, c := newBackend(t, agent)
-	if _, err := b.EnsureAgent(context.Background(), agent, "r"); err != nil {
+	if _, err := b.EnsureAgent(context.Background(), agent, Deps{Revision: "r"}); err != nil {
 		t.Fatal(err)
 	}
 	caps := get(t, c, &appsv1.Deployment{}).Spec.Template.Spec.Containers[0].SecurityContext.Capabilities
 	if len(caps.Add) != 1 || caps.Add[0] != "NET_BIND_SERVICE" {
 		t.Errorf("capabilities = %+v, want NET_BIND_SERVICE added for port 80", caps)
+	}
+}
+
+func TestEnsureAgentRollsPodsWhenVirtualKeyChanges(t *testing.T) {
+	agent := containerAgent()
+	b, c := newBackend(t, agent)
+	ctx := context.Background()
+
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: "r", VirtualKeyID: "vk-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, c, &appsv1.Deployment{}).Spec.Template.Annotations[AnnotationVirtualKeyID]; got != "vk-1" {
+		t.Fatalf("virtual key annotation = %q, want vk-1", got)
+	}
+
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: "r", VirtualKeyID: "vk-2"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(t, c, &appsv1.Deployment{}).Spec.Template.Annotations[AnnotationVirtualKeyID]; got != "vk-2" {
+		t.Errorf("rotated key not rolled out: annotation = %q", got)
+	}
+
+	if _, err := b.EnsureAgent(ctx, agent, Deps{Revision: "r"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := get(t, c, &appsv1.Deployment{}).Spec.Template.Annotations[AnnotationVirtualKeyID]; ok {
+		t.Error("annotation must be removed when keys are not managed")
 	}
 }

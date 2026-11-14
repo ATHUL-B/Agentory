@@ -34,7 +34,18 @@ const (
 
 	// AnnotationRevision on pod templates makes a spec change roll the workload.
 	AnnotationRevision = "agentory.dev/revision"
+	// AnnotationVirtualKeyID on pod templates makes a key rotation roll the workload,
+	// since environment variables from Secrets are only read at container start.
+	AnnotationVirtualKeyID = "agentory.dev/virtual-key-id"
 )
+
+// Deps is what the operator resolved for an Agent before handing it to a backend.
+type Deps struct {
+	// Revision is the Agent's spec revision.
+	Revision string
+	// VirtualKeyID identifies the Agent's LLM gateway key; empty if keys are not managed.
+	VirtualKeyID string
+}
 
 // AgentRuntimeStatus is what a backend reports about an Agent's workload.
 type AgentRuntimeStatus struct {
@@ -59,7 +70,7 @@ type Backend interface {
 	// Supports reports whether this backend can run the Agent.
 	Supports(agent *agentoryv1alpha1.Agent) bool
 	// EnsureAgent creates or updates the Agent's long-lived resources and reports their state.
-	EnsureAgent(ctx context.Context, agent *agentoryv1alpha1.Agent, revision string) (AgentRuntimeStatus, error)
+	EnsureAgent(ctx context.Context, agent *agentoryv1alpha1.Agent, deps Deps) (AgentRuntimeStatus, error)
 }
 
 // Registry picks the backend for an Agent. The first backend that supports it wins.

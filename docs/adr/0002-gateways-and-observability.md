@@ -44,6 +44,19 @@ Uber's internal platform and AWS OAP both route all traffic through gateways.
 - The collector (0.163.x) names the gRPC OTLP exporter `otlp_grpc`; `otlp` is a
   deprecated alias.
 
+### Amendment (2026-11-14): Bifrost access model
+
+- **Admin API locked, inference by virtual key only.** Bifrost runs with an
+  admin account (`auth_config.is_enabled`), which protects `/api` and the
+  dashboard, plus `disable_auth_on_inference: true` and
+  `enforce_auth_on_inference: true`, so model calls need a virtual key (read
+  from `x-bf-vk`, `x-api-key` or `Authorization`) and nothing else.
+- **The operator is the only admin client.** It holds the admin credentials
+  and creates one least-privilege key per Agent. Workloads never see admin
+  credentials or provider keys.
+- **`sourceOfTruth: split`**, because `config.json` mode deletes API-created keys
+  on restart.
+
 ## Consequences
 
 - Black-box containers get model/tool tracing and cost for free.

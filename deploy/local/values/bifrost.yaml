@@ -24,14 +24,21 @@ storage:
 
 bifrost:
   logLevel: info
-  # Make config.json authoritative on every start-up. With the default "split"
-  # mode, rows already in Bifrost's database (e.g. a virtual key from a previous
-  # run) win over changed values here, so re-running `make up` would not apply
-  # edits.
-  sourceOfTruth: "config.json"
+  # Keep the default "split" source of truth. "config.json" mode deletes, on
+  # every start-up, all database rows for sections present in the file, which
+  # would wipe the per-agent virtual keys the operator creates through the API.
   encryptionKeySecret:
     name: bifrost-encryption
     key: encryption-key
+  # Admin credentials lock the management API (/api, dashboard), which the
+  # operator uses to manage per-agent virtual keys. Inference stays open to
+  # virtual keys only (disableAuthOnInference), enforced by enforceAuthOnInference.
+  authConfig:
+    isEnabled: true
+    disableAuthOnInference: true
+    existingSecret: bifrost-admin
+    usernameKey: username
+    passwordKey: password
   client:
     # Every inference call must carry a virtual key (x-bf-vk) or API key.
     enforceAuthOnInference: true

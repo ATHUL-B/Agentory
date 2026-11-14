@@ -75,7 +75,7 @@ func (r *TaskReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Status().Update(ctx, &task); err != nil {
 		return statusUpdateResult(err)
 	}
-	log.Info("task status updated", "phase", desired.Phase, "agentRevision", desired.AgentRevision)
+	log.Info("Updated Task status", "phase", desired.Phase, "agentRevision", desired.AgentRevision)
 	return ctrl.Result{}, nil
 }
 

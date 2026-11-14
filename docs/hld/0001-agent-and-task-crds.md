@@ -217,6 +217,26 @@ are level-triggered and safe to retry.
   locations come from operator flags (`--llm-gateway`, `--agent-gateway`, `--otel-collector`).
 - Status writes that hit a conflict requeue after 200ms instead of logging an error.
 
+### 4.2 Implemented (item 5): per-agent virtual keys
+
+- `internal/llmgateway.Client` (Get, FindByName, Create, Update, Delete) with a
+  Bifrost implementation (`/api/governance/virtual-keys`, HTTP Basic auth) and an
+  in-memory fake for tests. Bifrost generates both ID and value; neither can be
+  chosen by the caller.
+- `internal/virtualkey.Manager` runs before the backend. Key = only the Agent's
+  model; value + ID in the Agent-owned Secret `<agent>-llm`; a spec hash
+  annotation avoids redundant updates.
+- **Rotation on loss**: a 404 for the stored ID creates a new key. The backend
+  stamps `agentory.dev/virtual-key-id` on the pod template (`runtime.Deps`), so pods
+  restart, because env from Secrets is read only at container start. The resync is
+  10 minutes.
+- **Finalizer** `agentory.dev/virtual-key` deletes the key (and any orphan with the
+  same name) on Agent deletion.
+- Gateway errors are written to status (`VirtualKeyReady=False/GatewayError`)
+  before the reconcile returns the error for backoff.
+- Bifrost must run with `sourceOfTruth: split`. `config.json` mode prunes
+  API-created keys at every start-up (verified).
+
 ## 5. Runtimes
 
 ### 5.1 Container (`runtime: container`)

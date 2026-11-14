@@ -268,6 +268,74 @@ else
   warn "skipped: operator not deployed"
 fi
 
+log "Per-agent virtual keys (optional: make operator-up)"
+admin_pass_file="${SECRETS_DIR}/bifrost-admin-password"
+if k get crd agents.agentory.dev >/dev/null 2>&1 && [[ -s "$admin_pass_file" ]] \
+    && k -n agentory-operator-system get secret llm-gateway-admin >/dev/null 2>&1; then
+  e2e=agentory-e2e
+  admin_pass="$(cat "$admin_pass_file")"
+  vk_api() {  # method path -> HTTP status of an admin call to Bifrost's governance API
+    k -n agentory-smoke exec probe -- curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+      -u "${BIFROST_ADMIN_USER}:${admin_pass}" -X "$1" "http://bifrost.bifrost.svc.cluster.local:8080$2" 2>/dev/null || true
+  }
+  assert_code "$(probe_status http://bifrost.bifrost.svc.cluster.local:8080/api/governance/virtual-keys)" "401" \
+    "Bifrost management API requires admin credentials"
+
+  k -n "$e2e" apply -f - >/dev/null <<EOF
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-keyed }
+spec:
+  runtime: container
+  lifecycle: service
+  container: { image: ${SMOKE_AGENT_IMAGE}, port: 8080 }
+  model: { provider: mock, name: mock-model }
+EOF
+  if k -n "$e2e" wait --for=condition=VirtualKeyReady agent/smoke-keyed --timeout=120s >/dev/null 2>&1 \
+      && k -n "$e2e" wait --for=condition=Ready agent/smoke-keyed --timeout=180s >/dev/null 2>&1; then
+    key_id() { k -n "$e2e" get secret smoke-keyed-llm -o jsonpath='{.metadata.annotations.agentory\.dev/virtual-key-id}'; }
+    # The pod whose template carries the given key ID (skips pods being replaced).
+    pod_for_key() {
+      k -n "$e2e" rollout status deploy/smoke-keyed --timeout=120s >/dev/null 2>&1 || true
+      k -n "$e2e" get pod -l agentory.dev/agent=smoke-keyed \
+        -o jsonpath="{.items[?(@.metadata.annotations.agentory\.dev/virtual-key-id==\"$1\")].metadata.name}" | awk '{print $1}'
+    }
+    chat_from() {  # pod model -> HTTP status, using the key injected into the pod
+      k -n "$e2e" exec "$1" -- sh -c "curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+        -H \"Authorization: Bearer \$OPENAI_API_KEY\" -H 'Content-Type: application/json' \
+        \$AGENTORY_LLM_BASE_URL/chat/completions \
+        -d '{\"model\":\"$2\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'" 2>/dev/null || true
+    }
+    id="$(key_id)"
+    pass "Agent has its own key (${id}) in Secret smoke-keyed-llm"
+    assert_code "$(vk_api GET "/api/governance/virtual-keys/${id}")" "200" "key exists in Bifrost"
+    pod="$(pod_for_key "$id")"
+    assert_code "$(chat_from "$pod" mock/mock-model)" "200" "agent pod calls its model with the injected key"
+    assert_code "$(chat_from "$pod" mock/other-model)" "403" "the key allows only the agent's own model"
+
+    # Bifrost loses the key: the operator re-creates it and rolls the pods.
+    vk_api DELETE "/api/governance/virtual-keys/${id}" >/dev/null
+    k -n "$e2e" annotate agent smoke-keyed agentory.dev/smoke-poke="$(date +%s)" --overwrite >/dev/null
+    new_id="$id"
+    for _ in $(seq 1 30); do new_id="$(key_id)"; [[ "$new_id" != "$id" ]] && break; sleep 1; done
+    if [[ "$new_id" != "$id" ]]; then
+      pass "lost key re-created (${new_id})"
+      pod="$(pod_for_key "$new_id")"
+      assert_code "$(chat_from "$pod" mock/mock-model)" "200" "restarted pod works with the rotated key"
+    else
+      fail "lost key was not re-created within 30s"
+    fi
+
+    k -n "$e2e" delete agent smoke-keyed --timeout=60s >/dev/null 2>&1
+    assert_code "$(vk_api GET "/api/governance/virtual-keys/${new_id}")" "404" "deleting the Agent deleted its key"
+  else
+    fail "keyed Agent not Ready: $(k -n "$e2e" get agent smoke-keyed -o jsonpath='{.status.conditions[?(@.status=="False")].message}')"
+    k -n "$e2e" delete agent smoke-keyed --ignore-not-found --wait=false >/dev/null
+  fi
+else
+  warn "skipped: operator not deployed with Bifrost credentials"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"

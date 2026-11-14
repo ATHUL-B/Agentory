@@ -13,7 +13,8 @@ Built with kubebuilder v4.16 / controller-runtime.
 | Task controller: resolves its Agent, records `agentRevision`, re-queued when the Agent changes | ✅ |
 | **DeploymentBackend**: `container` + `service` agents → Deployment, Service, ServiceAccount, NetworkPolicy (owned by the Agent; deleting it cleans up) | ✅ (item 4) |
 | Gateway environment injection and egress/ingress lockdown | ✅ (item 4) |
-| Virtual keys (item 5), A2A routes (6), harness Jobs (7), declarative runtime (8) | Backlog |
+| **Per-agent virtual keys** in Bifrost: one key per Agent, only its model, in Secret `<agent>-llm`; re-created if lost; deleted with the Agent | ✅ (item 5) |
+| A2A routes (6), harness Jobs (7), declarative runtime (8) | Backlog |
 
 ## API at a glance
 
@@ -48,7 +49,7 @@ Full examples: [`config/samples/`](config/samples/).
 
 ### Status
 
-- `Agent.status`: `phase` (`Ready` once the workload is available; `Failed` on a resource conflict), `observedGeneration`, `revision` (`<name>-<10 hex>`, from a hash of the spec), `endpoints.internal`, `conditions` (`Accepted`, `EgressPolicyApplied`, `WorkloadReady`, `Ready`).
+- `Agent.status`: `phase` (`Ready` once the workload is available and the key is ready; `Failed` on a resource conflict), `observedGeneration`, `revision` (`<name>-<10 hex>`, from a hash of the spec), `endpoints.internal`, `virtualKeyRef`, `conditions` (`Accepted`, `VirtualKeyReady`, `EgressPolicyApplied`, `WorkloadReady`, `Ready`).
 - `Task.status`: `phase` (`Pending` … `Succeeded/Failed/Cancelled`), `agentRevision`, `conditions` (`AgentResolved`, `Started`), plus `traceId`, `usage`, `result` (filled by later backends).
 
 ## What a container Agent gets
@@ -72,7 +73,7 @@ operator leaves it untouched and reports `Ready=False`, reason `ResourceConflict
 |---|---|
 | `AGENTORY_LLM_BASE_URL` | `http://bifrost.bifrost.svc.cluster.local:8080/v1` (OpenAI-compatible) |
 | `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` | Bifrost's `/openai` and `/anthropic` SDK endpoints |
-| `AGENTORY_LLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | From Secret `<agent>-llm`, key `virtual-key` (optional; created by item 5) |
+| `AGENTORY_LLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | The Agent's virtual key, from Secret `<agent>-llm`, key `virtual-key` (see below) |
 | `AGENTORY_MODEL` | `provider/name`, e.g. `mock/mock-model` |
 | `AGENTORY_A2A_URL`, `AGENTORY_MCP_URL` | agent gateway; MCP path `/mcp/<namespace>/<agent>` (routes in item 6) |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | collector; `agentory.agent/namespace/revision` attributes. `observability.sink: none` sets `OTEL_SDK_DISABLED=true` instead |
@@ -83,6 +84,42 @@ Names starting `AGENTORY_` or `OTEL_`, and the four SDK variables, are reserved:
 
 Gateway locations are operator flags, as `namespace/name:port`:
 `--llm-gateway`, `--agent-gateway`, `--otel-collector`, plus `--cluster-domain`.
+
+## Per-agent virtual keys
+
+When the operator has LLM gateway admin credentials (env
+`LLM_GATEWAY_ADMIN_USERNAME` / `LLM_GATEWAY_ADMIN_PASSWORD`, from the optional
+Secret `llm-gateway-admin` in the operator's namespace), every Agent gets its
+own Bifrost virtual key:
+
+- **Least privilege**: the key allows only `spec.model` (provider + name). Other
+  models get `403 model_blocked` from Bifrost. Changing the model updates the key
+  in place; its value doesn't change.
+- **Attribution**: the key is named `agentory:<namespace>/<agent>` and carries
+  metadata `agentory.agent`, `agentory.namespace`, `agentory.uid`, which Bifrost
+  copies onto every log entry.
+- **Storage**: the value is written to the Agent-owned Secret `<agent>-llm`
+  (key `virtual-key`, annotation `agentory.dev/virtual-key-id`). Workloads read it
+  as `AGENTORY_LLM_API_KEY`, `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
+- **Self-healing**: if Bifrost no longer has the key (for example after its
+  database was reset), the next reconcile creates a new one. That happens on any
+  change, or within the 10-minute resync. The pod template is stamped with the key
+  ID, so the pods restart with the new value. A key left without a Secret (orphan)
+  is replaced.
+- **Cleanup**: the finalizer `agentory.dev/virtual-key` deletes the key from
+  Bifrost before the Agent goes away. If key management is later turned off,
+  the finalizer is released without deleting the key (logged).
+- **Status**: condition `VirtualKeyReady`, `status.virtualKeyRef`; `Ready` needs
+  the key too. A Bifrost outage shows as `VirtualKeyReady=False`, reason
+  `GatewayError` with the message, and is retried with backoff.
+- Secrets are read straight from the API server: the operator doesn't cache
+  (or watch) Secrets cluster-wide.
+
+Without credentials, key management is off and Agents run without
+`VirtualKeyReady` (their pods' key variables stay empty).
+
+If Bifrost is gone for good and an Agent is stuck deleting:
+`kubectl patch agent <name> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`.
 
 ## Develop
 
