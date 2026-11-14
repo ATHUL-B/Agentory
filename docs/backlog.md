@@ -8,7 +8,9 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | ID | Item | Priority | Status | Design | PR |
 |----|------|----------|--------|--------|----|
 | 1 | Architecture, ADRs and Agent/Task HLD | P0 | in-progress | HLD-0001 | - |
-| 2 | Local dev cluster: kind + Calico, Bifrost, agentgateway, OTel collector, Langfuse; `make up` / `make down` | P0 | todo | ADR-0002 | - |
+| 2 | Local dev cluster: kind + Calico, Bifrost, agentgateway, OTel collector → Jaeger; `make up` / `make smoke` / `make check` / `make down`. Static checks pass; first `make up` + `make smoke` run pending Docker on a dev machine | P0 | in-progress | ADR-0002 | - |
+| 2a | CI: run `make check` on every PR (GitHub Actions) | P0 | todo | - | - |
+| 2b | Local Langfuse profile (cert-manager + ClickHouse operator), collector exporter switch | P1 | todo | ADR-0002 amendment | - |
 | 3 | Operator scaffold (kubebuilder), `Agent` + `Task` CRDs with CEL validation | P0 | todo | HLD-0001 §3 | - |
 | 4 | `DeploymentBackend` + `runtime: container` + egress NetworkPolicy + gateway env injection | P0 | todo | HLD-0001 §5.1, §6 | - |
 | 5 | Bifrost virtual key per agent (`LLMGatewayClient`) | P0 | todo | ADR-0002 | - |

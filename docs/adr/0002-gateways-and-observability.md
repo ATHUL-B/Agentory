@@ -32,6 +32,18 @@ Uber's internal platform and AWS OAP both route all traffic through gateways.
    by default, **MLflow** or Jaeger as options. Agent code never imports a
    vendor SDK.
 
+### Amendment (2026-11-14): local environment
+
+- **Local trace sink is Jaeger, not Langfuse.** The Langfuse Helm chart v2.x
+  requires cert-manager, the ClickHouse operator, ClickHouse + Keeper, Postgres,
+  Valkey and S3-compatible storage, which is too heavy for a 16 GB laptop.
+  Langfuse remains the default for shared environments; a local Langfuse
+  profile is backlog item 2b. Agent code is unaffected either way (point 5).
+- **CNI is Calico** on kind, because NetworkPolicy egress enforcement
+  (point 3) is what the lockdown relies on.
+- The collector (0.163.x) names the gRPC OTLP exporter `otlp_grpc`; `otlp` is a
+  deprecated alias.
+
 ## Consequences
 
 - Black-box containers get model/tool tracing and cost for free.

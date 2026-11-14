@@ -98,7 +98,14 @@ Two orthogonal fields replace a fixed list of agent types (HLD-0001):
 | `service` (long-lived) | n/a | **Type 2**: multi-agent systems | **Type 3**: non-developer agents |
 | `suspendable` (planned) | Later | Later | Later (needs Substrate) |
 
-## 6. Key decisions
+## 6. Environments
+
+| Environment | Where | Trace sink | Notes |
+|---|---|---|---|
+| Local | kind on a laptop, [`deploy/local/`](../deploy/local/README.md) | Jaeger | `make up` / `make smoke`; Calico for egress policy |
+| Shared / prod | Any Kubernetes with a NetworkPolicy-enforcing CNI | Langfuse (or MLflow) | Not built yet |
+
+## 7. Key decisions
 
 Recorded as ADRs in [`adr/`](adr/):
 
@@ -109,7 +116,7 @@ Recorded as ADRs in [`adr/`](adr/):
   traffic, agentgateway for A2A/MCP, OpenTelemetry as the observability
   contract.
 
-## 7. Prior art and what we borrow
+## 8. Prior art and what we borrow
 
 | Project | What we take |
 |---|---|
@@ -119,7 +126,7 @@ Recorded as ADRs in [`adr/`](adr/):
 | Paperclip | Harness adapters, budgets and governance ideas |
 | Uber agent platform | Omni-MCP discovery tools, response projection, actor-chain identity, tools disabled until reviewed |
 
-## 8. Out of scope (for now)
+## 9. Out of scope (for now)
 
 - Snapshot/suspend density, live-state forks, gVisor/Kata isolation (backlog,
   via `SubstrateBackend`).
