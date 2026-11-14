@@ -1,0 +1,17 @@
+# Scenario 2: a coding agent. Claude Code runs in a fresh, locked-down pod for
+# every Task, with the same gateway-enforced tools.
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata:
+  name: payments-coder
+  namespace: team-payments
+spec:
+  description: Prepares fixes and rollbacks for the payments services
+  runtime: harness
+  lifecycle: perTask
+  harness: { kind: claude-code }
+  model: { provider: ${MODEL_PROVIDER}, name: ${MODEL_NAME} }
+  tools:
+    mcpServers:
+      - name: oncall
+        tools: [get_recent_deploys]

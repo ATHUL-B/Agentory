@@ -1,0 +1,18 @@
+# Scenario 3: a team's own multi-agent container (examples/incident-commander).
+# It asks payments-oncall over A2A, then summarises with its own model. The
+# platform gives it a key, a route, an Agent Card and tracing; nothing else.
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata:
+  name: incident-commander
+  namespace: team-payments
+spec:
+  description: Coordinates specialist agents and writes the incident summary
+  runtime: container
+  lifecycle: service
+  container:
+    image: ${INCIDENT_COMMANDER_IMAGE}
+    port: 8080
+    env:
+      - { name: SPECIALISTS, value: payments-oncall }
+  model: { provider: ${MODEL_PROVIDER}, name: ${MODEL_NAME} }

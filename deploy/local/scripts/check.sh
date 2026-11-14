@@ -11,17 +11,17 @@ fail() { printf '\033[1;31m  ✗\033[0m %s\n' "$*" >&2; failures=$((failures + 1
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 
 log "Shell syntax"
-for f in "${LOCAL_DIR}"/scripts/*.sh; do
+for f in "${LOCAL_DIR}"/scripts/*.sh "${REPO_DIR}"/demo/run.sh; do
   if bash -n "$f"; then ok "$(basename "$f")"; else fail "$(basename "$f")"; fi
 done
 if command -v shellcheck >/dev/null 2>&1; then
-  if shellcheck -x -P SCRIPTDIR "${LOCAL_DIR}"/scripts/*.sh; then ok "shellcheck"; else fail "shellcheck"; fi
+  if shellcheck -x -P SCRIPTDIR "${LOCAL_DIR}"/scripts/*.sh "${REPO_DIR}"/demo/run.sh; then ok "shellcheck"; else fail "shellcheck"; fi
 else
   warn "shellcheck not installed; skipped"
 fi
 
 log "Unit tests"
-for tool in tools/mock-llm tools/echo-agent tools/oncall-mcp harness/claude-code runtime/declarative; do
+for tool in tools/mock-llm tools/echo-agent tools/oncall-mcp examples/incident-commander demo harness/claude-code runtime/declarative; do
   if python3 -m unittest discover -s "${REPO_DIR}/${tool}" -q > "${tmp}/unittest.log" 2>&1; then
     ok "${tool} ($(grep -oE 'Ran [0-9]+ tests' "${tmp}/unittest.log"))"
   else

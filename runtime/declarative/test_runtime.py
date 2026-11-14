@@ -184,6 +184,7 @@ class AgentTest(unittest.TestCase):
                 return [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
 
             def call(self, name, arguments, traceparent=""):
+                self.traceparent = traceparent
                 return f"{name}({arguments}) = 42"
         chat = FakeChat(replies=[
             ({"role": "assistant", "content": None, "tool_calls": [
@@ -191,10 +192,37 @@ class AgentTest(unittest.TestCase):
              {"prompt_tokens": 5, "completion_tokens": 1}),
             ({"role": "assistant", "content": "It is 42."}, {"prompt_tokens": 8, "completion_tokens": 2}),
         ])
-        resp = agent_with(chat, tools=EchoTools()).handle(send("what is it?"))
+        tools, tracer = EchoTools(), RecordingTracer()
+        resp = agent_with(chat, tracer, tools=tools).handle(send("what is it?"))
         self.assertEqual(resp["result"]["parts"][0]["text"], "It is 42.")
         tool_msg = chat.calls[1]["messages"][-1]
         self.assertEqual((tool_msg["role"], tool_msg["content"]), ("tool", 'lookup({"q":1}) = 42'))
+
+        tool_span, agent_span = tracer.spans()
+        self.assertEqual((tool_span["name"], tool_span["kind"]), ("execute_tool lookup", 1))
+        self.assertEqual(tool_span["parentSpanId"], agent_span["spanId"], "tool span is a child of the agent span")
+        attrs = {a["key"]: list(a["value"].values())[0] for a in tool_span["attributes"]}
+        self.assertEqual((attrs["gen_ai.tool.name"], attrs["gen_ai.tool.call.id"]), ("lookup", "c1"))
+        self.assertEqual(tools.traceparent, f"00-{tool_span['traceId']}-{tool_span['spanId']}-01",
+                         "the MCP call continues from the tool span")
+
+    def test_failed_tool_call_marks_its_span(self):
+        class Broken(ToolProvider):
+            def definitions(self):
+                return [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+
+            def call(self, name, arguments, traceparent=""):
+                return "Error: Unknown tool: lookup"
+        chat = FakeChat(replies=[
+            ({"role": "assistant", "content": None, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]}, {}),
+            ({"role": "assistant", "content": "I could not look it up."}, {}),
+        ])
+        tracer = RecordingTracer()
+        agent_with(chat, tracer, tools=Broken()).handle(send("what is it?"))
+        tool_span, agent_span = tracer.spans()
+        self.assertEqual(tool_span["status"], {"code": 2, "message": "Error: Unknown tool: lookup"})
+        self.assertEqual(agent_span["status"], {"code": 1}, "the agent recovered, so its request succeeded")
 
 
 class StoreTest(unittest.TestCase):
