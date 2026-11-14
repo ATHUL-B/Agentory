@@ -25,7 +25,16 @@ git clone git@github.com:ATHUL-B/Agentory.git
 cd Agentory
 ```
 
-Local setup instructions arrive with the dev-cluster work (backlog item 2).
+Run the local dev cluster (needs Docker, kind, kubectl, helm):
+
+```bash
+export ANTHROPIC_API_KEY=...   # optional, enables real model calls
+make up       # kind + Calico, Bifrost, agentgateway, OTel collector, Jaeger
+make smoke    # end-to-end checks
+make down
+```
+
+Details: [`deploy/local/README.md`](deploy/local/README.md).
 
 ## Contributing
 
