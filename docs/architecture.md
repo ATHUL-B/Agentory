@@ -81,7 +81,7 @@ takes action under an approval policy that teams can trust.
 |---|---|---|
 | **Operator** | Reconciles `Agent` and `Task`; picks a `RuntimeBackend`; creates workloads, Services, NetworkPolicies, gateway routes, virtual keys, agent cards. Today: CRDs + validation, revisions, Task→Agent resolution ([`operator/`](../operator/README.md)) | Built (Go, kubebuilder) |
 | **RuntimeBackend** | Interface for running agents. v1: `DeploymentBackend`, `JobBackend`. Later: `SubstrateBackend` | Built |
-| **Declarative runtime** | Agentory's own harness for non-developer agents: instructions + skills + MCP tools, served over A2A, emits OTel spans | Built (Python) |
+| **Declarative runtime** | Agentory's own harness for non-developer agents: instructions + skills + MCP tools, served over A2A, emits OTel spans ([`runtime/declarative`](../runtime/declarative/README.md)) | Built (Python) |
 | **Harness images** | Thin wrappers that run Claude Code / Codex for one `Task` and report results ([`harness/claude-code`](../harness/claude-code/README.md)) | Built (thin) |
 | **LLM gateway** | All model traffic; virtual keys, routing, fallbacks, cost data | Reused: **Bifrost** |
 | **Agent gateway** | A2A routing between agents, MCP proxy/tool filtering, JWT policy | Reused: **agentgateway** |

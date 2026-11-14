@@ -22,7 +22,9 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 7b | Codex harness image (`kind: codex`) | P2 | todo | - | - |
 | 7c | Dispatch Tasks to service agents over A2A (`message/send`), recording the reply as the result | P1 | todo | - | - |
 | 7d | Cancel a running Task (`Cancelled` phase) and stream harness progress (stream-json) into status/events | P2 | todo | - | - |
-| 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | todo | HLD-0001 §5.2 | - |
+| 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | done (MCP waits for 6b) | HLD-0001 §5.2, §4.5 | - |
+| 8a | Skills from git (commit) and OCI (digest): fetch outside the locked-down pod (operator-side into ConfigMaps, or an init step through an egress proxy) | P1 | todo | HLD needed | - |
+| 8c | Conversation memory outside the pod (Redis/Postgres) so declarative agents scale past one replica | P1 | todo | - | - |
 | 9 | End-to-end demo script (four scenarios) | P0 | todo | HLD-0001 §9 | - |
 | 9a | Mock LLM provider (`mock/mock-model`) behind Bifrost: deterministic replies, tool calls, streaming, error injection; used by `make smoke` | P0 | done | HLD-0001 §9 | - |
 

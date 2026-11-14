@@ -10,7 +10,7 @@ make up      # create or update the cluster (idempotent)
 make smoke   # end-to-end checks against the running cluster
 make check   # static checks + unit tests, no Docker needed
 make test    # unit tests only (mock LLM + operator)
-make operator-up  # build the operator, echo agent and Claude Code harness, load into kind, deploy
+make operator-up  # build the operator, echo agent, Claude Code harness and declarative runtime; deploy
 make down    # delete the cluster (PURGE=1 also deletes generated keys)
 ```
 
@@ -113,6 +113,11 @@ curl -s localhost:8080/v1/chat/completions \
     **Succeeds**, listing the file it created, its token usage, and a traceId
     whose Bifrost spans are in Jaeger; a Task with a 1 s timeout fails with
     reason `Timeout`; deleting a Task removes its Job.
+12. Only after `make operator-up`: a declarative agent created before its skill
+    waits (`SkillNotFound`), then becomes Ready once the skill ConfigMap exists;
+    its card lists the skill; an A2A message is answered by the runtime through
+    the LLM gateway; **one trace** holds the agent's span and the gateway's spans;
+    a git-sourced skill is reported `SkillSourceNotSupported`.
 
 ## UIs
 
@@ -147,6 +152,7 @@ agent code is unaffected. A Langfuse profile is backlog item 2b.
 | Harness lists no changed files | git refuses a tree owned by another user ("dubious ownership") | Runner passes `-c safe.directory=*`; Jobs set `fsGroup` |
 | Claude Code doesn't call `Write` | `--bare` mode offers Bash, Read and Edit | Drive file changes through `Bash` (or Edit) |
 | Gateway returns 503 right after an Agent is Ready | Route accepted; the proxy picks it up a few seconds later | Retry briefly (the smoke test does) |
+| A smoke step is skipped although the operator runs | `cmd | grep -q` fails under `pipefail` (SIGPIPE) | Check CRDs instead of grepping logs |
 
 ## Troubleshooting
 
