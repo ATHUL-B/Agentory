@@ -20,8 +20,9 @@ smoke: ## Run end-to-end smoke checks against the local cluster
 check: ## Static checks: script syntax, chart rendering, collector config
 	@$(LOCAL_SCRIPTS)/check.sh
 
-test: ## Unit tests (no cluster needed): mock LLM + operator
+test: ## Unit tests (no cluster needed): mock LLM, echo agent, operator
 	@python3 -m unittest discover -s tools/mock-llm -q
+	@python3 -m unittest discover -s tools/echo-agent -q
 	@$(MAKE) -s operator-test
 
 operator-test: ## Operator unit + envtest tests, and lint

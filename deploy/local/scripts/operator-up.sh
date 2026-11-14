@@ -15,8 +15,12 @@ log "Building ${image}"
 docker build --quiet -t "${image}" "${OPERATOR_DIR}" >/dev/null
 ok "built"
 
-log "Loading into kind"
-kind load docker-image "${image}" --name "${KIND_CLUSTER_NAME}" >/dev/null
+log "Building example agent ${ECHO_AGENT_IMAGE}"
+docker build --quiet -t "${ECHO_AGENT_IMAGE}" "${REPO_DIR}/tools/echo-agent" >/dev/null
+ok "built"
+
+log "Loading images into kind"
+kind load docker-image "${image}" "${ECHO_AGENT_IMAGE}" --name "${KIND_CLUSTER_NAME}" >/dev/null
 ok "loaded"
 
 log "Deploying CRDs, RBAC and controller"
