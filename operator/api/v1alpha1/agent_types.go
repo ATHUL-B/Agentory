@@ -130,13 +130,26 @@ type SkillRef struct {
 	Source ArtifactSource `json:"source"`
 }
 
-// ArtifactSource selects exactly one immutable artifact location.
-// +kubebuilder:validation:XValidation:rule="has(self.git) != has(self.oci)",message="exactly one of git or oci must be set"
+// ArtifactSource selects exactly one artifact location.
+// +kubebuilder:validation:XValidation:rule="[has(self.git), has(self.oci), has(self.configMap)].filter(x, x).size() == 1",message="exactly one of git, oci or configMap must be set"
 type ArtifactSource struct {
 	// +optional
 	Git *GitArtifact `json:"git,omitempty"`
 	// +optional
 	OCI *OCIArtifact `json:"oci,omitempty"`
+	// ConfigMap in the Agent's namespace holding the bundle: a SKILL.md key plus
+	// any other files. Mounted read-only; prefer an immutable ConfigMap and a new
+	// name per version.
+	// +optional
+	ConfigMap *ConfigMapArtifact `json:"configMap,omitempty"`
+}
+
+// ConfigMapArtifact references a ConfigMap in the Agent's namespace.
+type ConfigMapArtifact struct {
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=253
+	// +required
+	Name string `json:"name"`
 }
 
 // GitArtifact is content at a full commit SHA, so it cannot change underneath the agent.
