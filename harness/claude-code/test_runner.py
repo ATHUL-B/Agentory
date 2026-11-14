@@ -48,6 +48,19 @@ class ClaudeCodeTest(unittest.TestCase):
         self.assertEqual(pairs["--allowedTools"], DEFAULT_TOOLS)
         self.assertEqual(pairs["--max-turns"], "3")
 
+    def test_mcp_tools_from_the_gateway(self):
+        env = dict(ENV, AGENTORY_MCP_ENABLED="true", AGENTORY_MCP_URL="http://gw:8080/mcp/team/coder")
+        cmd = ClaudeCode().command(TaskConfig.from_env(env))
+        config = json.loads(cmd[cmd.index("--mcp-config") + 1])
+        self.assertEqual(config, {"mcpServers": {"agentory": {"type": "http", "url": "http://gw:8080/mcp/team/coder"}}})
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], DEFAULT_TOOLS + ",mcp__agentory")
+
+    def test_no_mcp_unless_enabled(self):
+        env = dict(ENV, AGENTORY_MCP_ENABLED="false", AGENTORY_MCP_URL="http://gw:8080/mcp/team/coder")
+        cmd = ClaudeCode().command(TaskConfig.from_env(env))
+        self.assertNotIn("--mcp-config", cmd)
+        self.assertEqual(cmd[cmd.index("--allowedTools") + 1], DEFAULT_TOOLS)
+
     def test_environment_pins_every_model_and_carries_trace(self):
         tracing = Tracing(rand=lambda n: "a" * (2 * n))
         env = ClaudeCode.environment(TaskConfig.from_env(ENV), {"ANTHROPIC_API_KEY": "sk-bf-x"}, tracing)
