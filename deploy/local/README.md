@@ -89,6 +89,11 @@ curl -s localhost:8080/v1/chat/completions \
 7. Only after `make operator-up`: the controller is running, an invalid Agent
    is rejected by CRD validation, a valid Agent is `Accepted`, and a Task
    resolves its Agent and records the Agent's revision.
+8. Only after `make operator-up`: a `container` Agent in namespace
+   `agentory-e2e` becomes `Ready`; inside its pod the gateway environment is
+   set, Bifrost is reachable, and `api.anthropic.com` and other services are
+   blocked; the pod accepts traffic from the agent gateway's namespace and
+   rejects it from other namespaces.
 
 ## UIs
 

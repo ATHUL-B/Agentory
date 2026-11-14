@@ -17,8 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"errors"
 	"regexp"
 	"testing"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 )
@@ -61,5 +65,18 @@ func TestTaskPhaseIsTerminal(t *testing.T) {
 		if got := phase.IsTerminal(); got != want {
 			t.Errorf("%q.IsTerminal() = %v, want %v", phase, got, want)
 		}
+	}
+}
+
+func TestStatusUpdateResult(t *testing.T) {
+	gr := schema.GroupResource{Group: "agentory.dev", Resource: "agents"}
+	if res, err := statusUpdateResult(apierrors.NewConflict(gr, "a", errors.New("stale"))); err != nil || res.RequeueAfter != conflictRequeueDelay {
+		t.Errorf("conflict: got %+v, %v; want quiet requeue", res, err)
+	}
+	if res, err := statusUpdateResult(apierrors.NewNotFound(gr, "a")); err != nil || res.RequeueAfter != 0 {
+		t.Errorf("not found: got %+v, %v; want done", res, err)
+	}
+	if _, err := statusUpdateResult(errors.New("boom")); err == nil {
+		t.Error("other errors must be returned")
 	}
 }

@@ -220,6 +220,15 @@ type ContainerSpec struct {
 	// +kubebuilder:default=a2a
 	// +optional
 	Protocol ContainerProtocol `json:"protocol,omitempty"`
+
+	// Env adds environment variables. Names the platform injects (AGENTORY_*, OTEL_*,
+	// and the OpenAI/Anthropic SDK base URL and key variables) are reserved.
+	// +kubebuilder:validation:MaxItems=64
+	// +kubebuilder:validation:XValidation:rule="self.all(e, !e.name.startsWith('AGENTORY_') && !e.name.startsWith('OTEL_') && !(e.name in ['OPENAI_BASE_URL', 'OPENAI_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_API_KEY']))",message="env names AGENTORY_*, OTEL_*, OPENAI_BASE_URL, OPENAI_API_KEY, ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY are reserved for the platform"
+	// +listType=map
+	// +listMapKey=name
+	// +optional
+	Env []corev1.EnvVar `json:"env,omitempty"`
 }
 
 // ModelSpec names a model as the LLM gateway knows it.
@@ -299,6 +308,10 @@ const (
 
 // AgentEndpoints are where clients reach the agent.
 type AgentEndpoints struct {
+	// Internal is the in-cluster address of the agent's workload. Its network policy only
+	// admits traffic from the agent gateway; other agents should use the A2A endpoint.
+	// +optional
+	Internal string `json:"internal,omitempty"`
 	// +optional
 	A2A string `json:"a2a,omitempty"`
 	// +optional

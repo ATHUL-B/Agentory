@@ -202,6 +202,21 @@ Reconcilers:
 Idempotency: every `Ensure*` is create-or-update keyed by owner; reconcilers
 are level-triggered and safe to retry.
 
+### 4.1 Implemented (item 4)
+
+- `internal/runtime.Backend` has `Name`, `Supports` and `EnsureAgent(ctx, agent, revision)`;
+  task methods are added with the first per-task backend (item 7), not before.
+- `Registry` picks the first backend whose `Supports` is true; none → `Ready=False`,
+  `BackendNotImplemented`.
+- `DeploymentBackend` (`container` + `service`) owns a Deployment, Service,
+  ServiceAccount and NetworkPolicy named after the Agent. Ownership via
+  controller references means deletion is plain garbage collection, so no finalizer.
+- It **never adopts** an existing object of the same name it doesn't control:
+  the Agent goes `Failed` with `ResourceConflict` and the object is left untouched.
+- `EnvBuilder` and `PolicyBuilder` are pure, separately unit-tested; gateway
+  locations come from operator flags (`--llm-gateway`, `--agent-gateway`, `--otel-collector`).
+- Status writes that hit a conflict requeue after 200ms instead of logging an error.
+
 ## 5. Runtimes
 
 ### 5.1 Container (`runtime: container`)
@@ -238,14 +253,16 @@ Injected into every agent workload:
 
 | Env var | Value |
 |---|---|
-| `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | Bifrost service URL |
-| `AGENTORY_LLM_API_KEY` (and provider-specific aliases) | The agent's Bifrost virtual key (from Secret) |
+| `AGENTORY_LLM_BASE_URL` | Bifrost's OpenAI-compatible API (`…/v1`) |
+| `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | Bifrost's SDK endpoints (`…/openai`, `…/anthropic`) |
+| `AGENTORY_LLM_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` | The agent's Bifrost virtual key, from Secret `<agent>-llm` key `virtual-key` (Bifrost reads it from `x-api-key` or `Authorization`) |
 | `AGENTORY_MCP_URL` | agentgateway MCP endpoint scoped to this agent |
 | `AGENTORY_A2A_URL` | agentgateway A2A base for calling other agents |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_RESOURCE_ATTRIBUTES` | Collector + agent identity |
 
-Egress NetworkPolicy per agent: allow DNS, Bifrost, agentgateway, OTel
-collector; deny everything else. Harness agents that need git access get an
+NetworkPolicy per agent: egress to DNS, Bifrost, agentgateway and the OTel
+collector only; ingress only from the agent gateway's namespace, on the agent's
+port (none for per-task agents). Harness agents that need git access get an
 explicit allow entry for the git host. CNI must enforce NetworkPolicy (kind:
 use Calico or Cilium, not the default kindnet).
 

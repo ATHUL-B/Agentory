@@ -19,6 +19,9 @@ package controller
 import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -26,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 )
 
 var _ = Describe("Agent controller", func() {
@@ -99,5 +103,83 @@ var _ = Describe("Agent controller", func() {
 			NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "does-not-exist"},
 		})
 		Expect(err).NotTo(HaveOccurred())
+	})
+
+	Context("with the deployment backend", func() {
+		BeforeEach(func() {
+			reconciler.Backends = agentruntime.NewRegistry(
+				agentruntime.NewDeploymentBackend(k8sClient, k8sClient.Scheme(), agentruntime.DefaultGatewayConfig()))
+		})
+
+		containerAgent := func(name string) *agentoryv1alpha1.Agent {
+			return newDeclarativeAgent(name, func(a *agentoryv1alpha1.Agent) {
+				a.Spec.Runtime = agentoryv1alpha1.RuntimeContainer
+				a.Spec.Declarative = nil
+				a.Spec.Container = &agentoryv1alpha1.ContainerSpec{Image: "ghcr.io/example/crew:1.0.0"}
+			})
+		}
+
+		It("creates the workload and becomes Ready once the deployment is available", func() {
+			agent := containerAgent(uniqueName("crew"))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+
+			got := reconcileAgent(agent)
+			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhasePending))
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionEgressPolicyApplied)).To(BeTrue())
+			workload := meta.FindStatusCondition(got.Status.Conditions, ConditionWorkloadReady)
+			Expect(workload.Status).To(Equal(metav1.ConditionFalse))
+			Expect(workload.Reason).To(Equal(agentruntime.ReasonProgressing))
+
+			key := client.ObjectKeyFromObject(agent)
+			for _, obj := range []client.Object{&appsv1.Deployment{}, &corev1.Service{}, &corev1.ServiceAccount{}, &networkingv1.NetworkPolicy{}} {
+				Expect(k8sClient.Get(ctx, key, obj)).To(Succeed(), "%T", obj)
+				Expect(metav1.IsControlledBy(obj, got)).To(BeTrue(), "%T must be owned by the agent", obj)
+			}
+
+			// envtest runs no deployment controller: report availability ourselves.
+			var deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, key, &deploy)).To(Succeed())
+			deploy.Status = appsv1.DeploymentStatus{
+				ObservedGeneration: deploy.Generation, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1,
+			}
+			Expect(k8sClient.Status().Update(ctx, &deploy)).To(Succeed())
+
+			got = reconcileAgent(agent)
+			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhaseReady))
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionReady)).To(BeTrue())
+			Expect(got.Status.Endpoints).NotTo(BeNil())
+			Expect(got.Status.Endpoints.Internal).To(Equal(
+				"http://" + agent.Name + "." + testNamespace + ".svc.cluster.local:8080"))
+		})
+
+		It("fails without touching a foreign object that has the agent's name", func() {
+			name := uniqueName("taken")
+			foreign := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace}}
+			Expect(k8sClient.Create(ctx, foreign)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, foreign)
+			agent := containerAgent(name)
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+
+			got := reconcileAgent(agent)
+			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhaseFailed))
+			ready := meta.FindStatusCondition(got.Status.Conditions, ConditionReady)
+			Expect(ready.Reason).To(Equal(agentruntime.ReasonResourceConflict))
+			Expect(ready.Message).To(ContainSubstring("is not managed by this Agent"))
+
+			var sa corev1.ServiceAccount
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(foreign), &sa)).To(Succeed())
+			Expect(sa.OwnerReferences).To(BeEmpty())
+		})
+
+		It("leaves agents without a backend at BackendNotImplemented", func() {
+			agent := newDeclarativeAgent(uniqueName("decl"))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+
+			ready := meta.FindStatusCondition(reconcileAgent(agent).Status.Conditions, ConditionReady)
+			Expect(ready.Reason).To(Equal(ReasonBackendNotImplemented))
+		})
 	})
 })
