@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
@@ -65,6 +66,10 @@ var _ = Describe("CRD validation", func() {
 			Entry("declarative perTask", func(a *agentoryv1alpha1.Agent) { a.Spec.Lifecycle = agentoryv1alpha1.LifecyclePerTask }),
 			Entry("harness perTask", harness),
 			Entry("container service", container),
+			Entry("container with its own env", func(a *agentoryv1alpha1.Agent) {
+				container(a)
+				a.Spec.Container.Env = []corev1.EnvVar{{Name: "LOG_LEVEL", Value: "debug"}}
+			}),
 			Entry("skill pinned to a git commit", gitSkill(validCommit)),
 			Entry("skill pinned to an OCI digest", func(a *agentoryv1alpha1.Agent) {
 				a.Spec.Declarative.Skills = []agentoryv1alpha1.SkillRef{{
@@ -175,6 +180,18 @@ var _ = Describe("CRD validation", func() {
 					}}
 				},
 				"spec.tools.mcpServers[0].url"),
+			Entry("container env overriding a platform variable",
+				func(a *agentoryv1alpha1.Agent) {
+					container(a)
+					a.Spec.Container.Env = []corev1.EnvVar{{Name: "OPENAI_BASE_URL", Value: "https://api.openai.com"}}
+				},
+				"reserved for the platform"),
+			Entry("container env using the AGENTORY_ prefix",
+				func(a *agentoryv1alpha1.Agent) {
+					container(a)
+					a.Spec.Container.Env = []corev1.EnvVar{{Name: "AGENTORY_MODEL", Value: "x"}}
+				},
+				"reserved for the platform"),
 			Entry("missing model",
 				func(a *agentoryv1alpha1.Agent) { a.Spec.Model = agentoryv1alpha1.ModelSpec{} },
 				"spec.model.provider"),
