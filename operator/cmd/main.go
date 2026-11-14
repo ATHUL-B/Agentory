@@ -42,6 +42,7 @@ import (
 	"github.com/ATHUL-B/Agentory/operator/internal/a2a"
 	"github.com/ATHUL-B/Agentory/operator/internal/controller"
 	"github.com/ATHUL-B/Agentory/operator/internal/llmgateway"
+	"github.com/ATHUL-B/Agentory/operator/internal/mcp"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 	// +kubebuilder:scaffold:imports
@@ -103,6 +104,8 @@ func main() {
 		"Default image for harness kind claude-code (spec.harness.image overrides it)")
 	declarativeImage := flag.String("declarative-runtime-image", "agentory-declarative-runtime:dev",
 		"Image that runs declarative agents (empty disables them)")
+	mcpRegistryNamespace := flag.String("mcp-registry-namespace", "agentory-mcp",
+		"Namespace of platform-wide MCPServers, searched after the Agent's own namespace")
 	flag.Parse()
 	harnessImages[agentoryv1alpha1.HarnessKindClaudeCode] = *claudeImage
 
@@ -217,6 +220,7 @@ func main() {
 		Backends:    backends,
 		VirtualKeys: virtualKeyManager(mgr, gateways),
 		Routes:      routeManager(mgr, gateways),
+		Tools:       toolsManager(mgr, gateways, *mcpRegistryNamespace),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agent")
 		os.Exit(1)
@@ -295,4 +299,17 @@ func routeManager(mgr ctrl.Manager, gateways agentruntime.GatewayConfig) *a2a.Ro
 	}
 	setupLog.Info("A2A exposure enabled", "gateway", gateways.AgentGateway.String())
 	return a2a.NewRouteManager(mgr.GetClient(), mgr.GetScheme(), gateways)
+}
+
+// toolsManager returns the MCP tools manager, or nil (tools disabled) when the
+// Gateway API or agentgateway CRDs are not installed.
+func toolsManager(mgr ctrl.Manager, gateways agentruntime.GatewayConfig, registryNamespace string) *mcp.Manager {
+	for _, gvk := range []schema.GroupVersionKind{a2a.HTTPRouteGVK, a2a.BackendGVK, mcp.PolicyGVK} {
+		if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			setupLog.Info("MCP tools disabled: API not installed", "kind", gvk.String(), "error", err.Error())
+			return nil
+		}
+	}
+	setupLog.Info("MCP tools enabled", "gateway", gateways.AgentGateway.String(), "registryNamespace", registryNamespace)
+	return mcp.NewManager(mgr.GetClient(), mgr.GetScheme(), gateways, registryNamespace)
 }

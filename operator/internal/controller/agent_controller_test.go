@@ -34,6 +34,7 @@ import (
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 	"github.com/ATHUL-B/Agentory/operator/internal/a2a"
 	gatewayfake "github.com/ATHUL-B/Agentory/operator/internal/llmgateway/fake"
+	"github.com/ATHUL-B/Agentory/operator/internal/mcp"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 )
@@ -339,16 +340,7 @@ var _ = Describe("Agent controller", func() {
 			route, err := getRoute(agent)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(metav1.IsControlledBy(route, got)).To(BeTrue())
-			Expect(unstructured.SetNestedSlice(route.Object, []any{map[string]any{
-				"parentRef":      map[string]any{"name": "agentory-gateway", "namespace": "agentgateway-system"},
-				"controllerName": "agentgateway.dev/agentgateway",
-				"conditions": []any{
-					map[string]any{"type": "Accepted", "status": "True", "reason": "Accepted", "message": "",
-						"lastTransitionTime": "2026-11-14T00:00:00Z"},
-					map[string]any{"type": "ResolvedRefs", "status": "True", "reason": "ResolvedRefs", "message": "",
-						"lastTransitionTime": "2026-11-14T00:00:00Z"},
-				},
-			}}, "status", "parents")).To(Succeed())
+			Expect(unstructured.SetNestedSlice(route.Object, acceptedByGateway(), "status", "parents")).To(Succeed())
 			Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
 
 			got = reconcileAgent(agent)
@@ -424,4 +416,103 @@ var _ = Describe("Agent controller", func() {
 			Expect(cfg.Data[agentruntime.RuntimeConfigFile]).To(ContainSubstring(`"path": "/etc/agentory/skills/triage"`))
 		})
 	})
+
+	Context("with MCP tools", func() {
+		const registry = "agentory-mcp-test"
+
+		BeforeEach(func() {
+			cfg := agentruntime.DefaultGatewayConfig()
+			reconciler.Backends = agentruntime.NewRegistry(agentruntime.NewDeploymentBackend(k8sClient, k8sClient.Scheme(), cfg))
+			reconciler.Tools = mcp.NewManager(k8sClient, k8sClient.Scheme(), cfg, registry)
+			ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: registry}}
+			Expect(client.IgnoreAlreadyExists(k8sClient.Create(ctx, ns))).To(Succeed())
+		})
+
+		toolAgent := func(name, server string) *agentoryv1alpha1.Agent {
+			return newDeclarativeAgent(name, func(a *agentoryv1alpha1.Agent) {
+				a.Spec.Runtime = agentoryv1alpha1.RuntimeContainer
+				a.Spec.Declarative = nil
+				a.Spec.Container = &agentoryv1alpha1.ContainerSpec{Image: "ghcr.io/example/agent:1"}
+				a.Spec.Tools = &agentoryv1alpha1.ToolsSpec{MCPServers: []agentoryv1alpha1.MCPServerRef{
+					{Name: server, Tools: []string{"get_recent_deploys"}}}}
+			})
+		}
+		available := func(agent *agentoryv1alpha1.Agent) {
+			var deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &deploy)).To(Succeed())
+			deploy.Status = appsv1.DeploymentStatus{ObservedGeneration: deploy.Generation, Replicas: 1,
+				UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
+			Expect(k8sClient.Status().Update(ctx, &deploy)).To(Succeed())
+		}
+		toolRoute := func(agent *agentoryv1alpha1.Agent) (*unstructured.Unstructured, error) {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(a2a.HTTPRouteGVK)
+			return u, k8sClient.Get(ctx, client.ObjectKey{Namespace: testNamespace, Name: agent.Name + "-mcp"}, u)
+		}
+
+		It("is not Ready while its MCP server is unknown", func() {
+			agent := toolAgent(uniqueName("tools"), "no-such-server")
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+			reconcileAgent(agent)
+			available(agent)
+			got := reconcileAgent(agent)
+
+			tools := meta.FindStatusCondition(got.Status.Conditions, ConditionToolsReady)
+			Expect(tools.Reason).To(Equal(mcp.ReasonMCPServerNotFound))
+			ready := meta.FindStatusCondition(got.Status.Conditions, ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(mcp.ReasonMCPServerNotFound))
+		})
+
+		It("routes a registry MCP server and becomes Ready once the gateway accepts it", func() {
+			server := &agentoryv1alpha1.MCPServer{
+				ObjectMeta: metav1.ObjectMeta{Name: uniqueName("oncall"), Namespace: registry},
+				Spec:       agentoryv1alpha1.MCPServerSpec{URL: "http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp"},
+			}
+			Expect(k8sClient.Create(ctx, server)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, server)
+			agent := toolAgent(uniqueName("tools"), server.Name)
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+			reconcileAgent(agent)
+			available(agent)
+
+			got := reconcileAgent(agent)
+			Expect(meta.FindStatusCondition(got.Status.Conditions, ConditionToolsReady).Reason).To(Equal(mcp.ReasonToolsPending))
+			route, err := toolRoute(agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(unstructured.SetNestedSlice(route.Object, acceptedByGateway(), "status", "parents")).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
+
+			got = reconcileAgent(agent)
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionToolsReady)).To(BeTrue())
+			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhaseReady))
+
+			By("removing the tools removes the route")
+			var current agentoryv1alpha1.Agent
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &current)).To(Succeed())
+			current.Spec.Tools = nil
+			Expect(k8sClient.Update(ctx, &current)).To(Succeed())
+			got = reconcileAgent(agent)
+			_, err = toolRoute(agent)
+			Expect(client.IgnoreNotFound(err)).To(Succeed())
+			Expect(err).To(HaveOccurred())
+			Expect(meta.FindStatusCondition(got.Status.Conditions, ConditionToolsReady)).To(BeNil())
+		})
+	})
 })
+
+// acceptedByGateway is the HTTPRoute status agentgateway writes when it accepts
+// a route (envtest runs no gateway controller).
+func acceptedByGateway() []any {
+	cond := func(t string) map[string]any {
+		return map[string]any{"type": t, "status": "True", "reason": t, "message": "",
+			"lastTransitionTime": "2026-11-14T00:00:00Z"}
+	}
+	return []any{map[string]any{
+		"parentRef":      map[string]any{"name": "agentory-gateway", "namespace": "agentgateway-system"},
+		"controllerName": "agentgateway.dev/agentgateway",
+		"conditions":     []any{cond("Accepted"), cond("ResolvedRefs")},
+	}}
+}

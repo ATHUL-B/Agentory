@@ -39,6 +39,7 @@ rules:
   - agentgateway.dev
   resources:
   - agentgatewaybackends
+  - agentgatewaypolicies
   verbs:
   - create
   - delete
@@ -76,6 +77,14 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - agentory.dev
+  resources:
+  - mcpservers
+  verbs:
+  - get
+  - list
+  - watch
 - apiGroups:
   - apps
   resources:

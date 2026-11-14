@@ -41,6 +41,7 @@ const (
 	ConditionVirtualKeyReady     = "VirtualKeyReady"
 	ConditionGatewayRouteReady   = "GatewayRouteReady"
 	ConditionComplete            = "Complete"
+	ConditionToolsReady          = "ToolsReady"
 )
 
 // Condition reasons.

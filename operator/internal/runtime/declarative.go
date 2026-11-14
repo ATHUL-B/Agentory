@@ -75,6 +75,8 @@ func RuntimeConfigName(agent *agentoryv1alpha1.Agent) string {
 type runtimeConfig struct {
 	Instructions string               `json:"instructions"`
 	Skills       []runtimeConfigSkill `json:"skills"`
+	// MCP turns on tools from AGENTORY_MCP_URL (the Agent lists MCP servers).
+	MCP bool `json:"mcp"`
 }
 
 type runtimeConfigSkill struct {
@@ -99,7 +101,7 @@ func (b *DeploymentBackend) declarativeWorkload(ctx context.Context, agent *agen
 		volumes:    []corev1.Volume{configMapVolume(runtimeConfigVolume, RuntimeConfigName(agent), false)},
 		mounts:     []corev1.VolumeMount{{Name: runtimeConfigVolume, MountPath: RuntimeConfigMountPath, ReadOnly: true}},
 	}
-	cfg := runtimeConfig{Instructions: agent.Spec.Declarative.Instructions, Skills: []runtimeConfigSkill{}}
+	cfg := runtimeConfig{Instructions: agent.Spec.Declarative.Instructions, Skills: []runtimeConfigSkill{}, MCP: hasTools(agent)}
 	hash := sha256.New()
 
 	for i, skill := range agent.Spec.Declarative.Skills {
