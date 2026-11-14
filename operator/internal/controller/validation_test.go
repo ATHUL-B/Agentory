@@ -79,6 +79,12 @@ var _ = Describe("CRD validation", func() {
 					}},
 				}}
 			}),
+			Entry("skill from a ConfigMap", func(a *agentoryv1alpha1.Agent) {
+				a.Spec.Declarative.Skills = []agentoryv1alpha1.SkillRef{{
+					Name:   testSkillName,
+					Source: agentoryv1alpha1.ArtifactSource{ConfigMap: &agentoryv1alpha1.ConfigMapArtifact{Name: "skill-triage-v1"}},
+				}}
+			}),
 			Entry("user-supplied MCP endpoint", func(a *agentoryv1alpha1.Agent) {
 				a.Spec.Tools = &agentoryv1alpha1.ToolsSpec{MCPServers: []agentoryv1alpha1.MCPServerRef{
 					{Name: "datadog", Tools: []string{"query_logs"}},
@@ -158,7 +164,12 @@ var _ = Describe("CRD validation", func() {
 						Ref: "ghcr.io/x@sha256:" + "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
 					}
 				},
-				"exactly one of git or oci must be set"),
+				"exactly one of git, oci or configMap must be set"),
+			Entry("skill with no source",
+				func(a *agentoryv1alpha1.Agent) {
+					a.Spec.Declarative.Skills = []agentoryv1alpha1.SkillRef{{Name: testSkillName}}
+				},
+				"exactly one of git, oci or configMap must be set"),
 			Entry("OCI skill without a digest",
 				func(a *agentoryv1alpha1.Agent) {
 					a.Spec.Declarative.Skills = []agentoryv1alpha1.SkillRef{{

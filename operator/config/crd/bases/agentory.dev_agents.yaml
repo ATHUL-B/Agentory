@@ -296,6 +296,19 @@ spec:
                         source:
                           description: Source is where the skill is fetched from.
                           properties:
+                            configMap:
+                              description: |-
+                                ConfigMap in the Agent's namespace holding the bundle: a SKILL.md key plus
+                                any other files. Mounted read-only; prefer an immutable ConfigMap and a new
+                                name per version.
+                              properties:
+                                name:
+                                  maxLength: 253
+                                  pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                                  type: string
+                              required:
+                              - name
+                              type: object
                             git:
                               description: GitArtifact is content at a full commit
                                 SHA, so it cannot change underneath the agent.
@@ -329,8 +342,10 @@ spec:
                               type: object
                           type: object
                           x-kubernetes-validations:
-                          - message: exactly one of git or oci must be set
-                            rule: has(self.git) != has(self.oci)
+                          - message: exactly one of git, oci or configMap must be
+                              set
+                            rule: '[has(self.git), has(self.oci), has(self.configMap)].filter(x,
+                              x).size() == 1'
                       required:
                       - name
                       - source

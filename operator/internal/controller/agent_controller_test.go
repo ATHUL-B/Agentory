@@ -380,4 +380,48 @@ var _ = Describe("Agent controller", func() {
 			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhaseReady), "an unexposed agent is ready without a route")
 		})
 	})
+
+	Context("with a declarative agent", func() {
+		BeforeEach(func() {
+			reconciler.Backends = agentruntime.NewRegistry(agentruntime.NewDeploymentBackend(
+				k8sClient, k8sClient.Scheme(), agentruntime.DefaultGatewayConfig()).WithDeclarativeImage("runtime:test"))
+		})
+
+		It("waits for its skill, then deploys the runtime with it", func() {
+			skillName := uniqueName("skill-triage")
+			agent := newDeclarativeAgent(uniqueName("oncall"), func(a *agentoryv1alpha1.Agent) {
+				a.Spec.Declarative.Skills = []agentoryv1alpha1.SkillRef{{
+					Name:   "triage",
+					Source: agentoryv1alpha1.ArtifactSource{ConfigMap: &agentoryv1alpha1.ConfigMapArtifact{Name: skillName}},
+				}}
+			})
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+
+			res, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(agent)})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.RequeueAfter).To(Equal(missingSkillRetry), "poll for the missing skill")
+			got := reconcileAgent(agent)
+			ready := meta.FindStatusCondition(got.Status.Conditions, ConditionReady)
+			Expect(ready.Status).To(Equal(metav1.ConditionFalse))
+			Expect(ready.Reason).To(Equal(agentruntime.ReasonSkillNotFound))
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &appsv1.Deployment{})).NotTo(Succeed())
+
+			skill := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: skillName, Namespace: testNamespace},
+				Data:       map[string]string{"SKILL.md": "---\nname: triage\n---\nCheck the pods."},
+			}
+			Expect(k8sClient.Create(ctx, skill)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, skill)
+
+			got = reconcileAgent(agent)
+			var deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Spec.Containers[0].Image).To(Equal("runtime:test"))
+			Expect(meta.FindStatusCondition(got.Status.Conditions, ConditionWorkloadReady).Reason).To(Equal(agentruntime.ReasonProgressing))
+			var cfg corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: testNamespace, Name: agent.Name + "-runtime"}, &cfg)).To(Succeed())
+			Expect(cfg.Data[agentruntime.RuntimeConfigFile]).To(ContainSubstring(`"path": "/etc/agentory/skills/triage"`))
+		})
+	})
 })

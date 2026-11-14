@@ -16,7 +16,8 @@ Built with kubebuilder v4.16 / controller-runtime.
 | **Per-agent virtual keys** in Bifrost: one key per Agent, only its model, in Secret `<agent>-llm`; re-created if lost; deleted with the Agent | ✅ (item 5) |
 | **A2A exposure**: generated Agent Card + agentgateway A2A backend + HTTPRoute at `/agents/<ns>/<agent>` | ✅ (item 6) |
 | **JobBackend + Tasks**: `harness` agents run each Task as a Job (Claude Code); result, usage, cost, changed files and traceId in `Task.status` | ✅ (item 7) |
-| Caller allow-lists (6a), MCP routing (6b), workspace clone (7a), declarative runtime (8) | Backlog |
+| **Declarative agents**: instructions + skills (ConfigMap `SKILL.md`), run by the declarative runtime; one trace from caller to model | ✅ (item 8) |
+| Caller allow-lists (6a), MCP routing (6b), workspace clone (7a), git/OCI skills (8a) | Backlog |
 
 ## API at a glance
 
@@ -154,6 +155,30 @@ needs per-agent caller identity at the gateway), and MCP routes under
 
 Exposure is turned off automatically, and logged, when the Gateway API or
 agentgateway CRDs are not installed.
+
+## Declarative agents
+
+A `runtime: declarative`, `lifecycle: service` Agent is just instructions and
+skills; the operator runs it with the
+[declarative runtime](../runtime/declarative/README.md)
+(`--declarative-runtime-image`). The operator:
+
+- writes `ConfigMap <agent>-runtime` (`config.json`: instructions + skill paths);
+- mounts each skill's ConfigMap read-only at `/etc/agentory/skills/<name>`;
+- stamps a hash of that content on the pod template (`agentory.dev/content-hash`),
+  so changed instructions or skills restart the pod.
+
+Skill sources:
+
+| Source | Status |
+|---|---|
+| `configMap: {name}`: a ConfigMap with a `SKILL.md` key (plus any files) in the Agent's namespace | ✅ |
+| `git` / `oci` | Accepted by the API; the Agent reports `Ready=False`, `SkillSourceNotSupported` (backlog 8a) |
+
+A missing ConfigMap, or one without `SKILL.md`, gives `Ready=False`,
+`SkillNotFound`, and nothing is deployed. The Agent re-checks every 15 s, so
+creating the skill afterwards is enough. Prefer **immutable** ConfigMaps with
+a new name per version.
 
 ## Harness agents and Tasks
 

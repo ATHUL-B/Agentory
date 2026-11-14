@@ -273,6 +273,21 @@ are level-triggered and safe to retry.
 - Verified: Bifrost serves Anthropic-API clients from an OpenAI-style provider
   through the Responses API, so the mock implements it.
 
+### 4.5 Implemented (item 8): declarative agents
+
+- `DeploymentBackend` runs `declarative` + `service` agents with the runtime image.
+  A per-runtime `workload` (image, env, volumes, mounts, content hash) keeps the
+  container and declarative paths sharing one Deployment builder.
+- New skill source **`configMap`** (CEL: exactly one of git, oci, configMap). It
+  needs no egress from the locked-down pod and is what a UI can write.
+  `git`/`oci` are reported as not supported yet (8a), never silently skipped.
+- The runtime config (`<agent>-runtime`) and skills are mounted read-only; a
+  content hash on the pod template restarts pods when either changes.
+- Missing skills are polled every 15 s (ConfigMaps aren't watched, to avoid
+  caching every one in the cluster).
+- Verified in kind: one Jaeger trace holds the caller's request, the agent's
+  `invoke_agent` span and Bifrost's spans for the model call.
+
 ## 5. Runtimes
 
 ### 5.1 Container (`runtime: container`)
@@ -283,8 +298,8 @@ are level-triggered and safe to retry.
   Session state must live outside the pod before scaling past one replica.
 
 ### 5.2 Declarative (`runtime: declarative`)
-- A shared image, `agentory/declarative-runtime` (Python), configured from a
-  ConfigMap generated from the spec.
+- A shared image, `agentory-declarative-runtime` (`runtime/declarative`,
+  Python stdlib), configured from a ConfigMap generated from the spec.
 - Components (classes): `A2AServer`, `AgentLoop`, `SkillLoader` (fetches pinned
   skills), `MCPToolset` (via agent gateway), `ModelClient` (via Bifrost),
   `Tracer` (OTel GenAI spans).

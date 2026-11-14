@@ -501,6 +501,119 @@ else
   warn "skipped: operator not deployed"
 fi
 
+log "Declarative agents: instructions + skills, no code (optional: make operator-up)"
+if k get crd agents.agentory.dev >/dev/null 2>&1 && k get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1; then
+  e2e=agentory-e2e
+  # The Agent first, then its skill: the operator must notice the skill appearing.
+  k -n "$e2e" apply -f - >/dev/null <<'EOF'
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-oncall }
+spec:
+  description: Smoke-test declarative on-call agent
+  runtime: declarative
+  lifecycle: service
+  declarative:
+    instructions: You are the on-call agent for the payments team.
+    skills:
+      - name: k8s-triage
+        source: { configMap: { name: smoke-skill-k8s-triage } }
+  model: { provider: mock, name: mock-model }
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-git-skill }
+spec:
+  runtime: declarative
+  lifecycle: service
+  declarative:
+    instructions: Uses a git skill.
+    skills:
+      - name: remote
+        source: { git: { url: "https://example.com/skills.git", commit: "0123456789abcdef0123456789abcdef01234567" } }
+  model: { provider: mock, name: mock-model }
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-decl-caller }
+spec:
+  runtime: container
+  lifecycle: service
+  container: { image: "agentory-echo-agent:dev", port: 8080 }
+  model: { provider: mock, name: mock-model }
+EOF
+  sleep 2
+  assert_code "$(k -n "$e2e" get agent smoke-oncall -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')" \
+    "SkillNotFound" "agent waits for its missing skill"
+  k -n "$e2e" apply -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: smoke-skill-k8s-triage }
+data:
+  SKILL.md: |
+    ---
+    name: k8s-triage
+    description: Triage a failing workload
+    ---
+    Check recent deploys first.
+EOF
+  if k -n "$e2e" wait --for=condition=Ready agent/smoke-oncall agent/smoke-decl-caller --timeout=180s >/dev/null 2>&1; then
+    pass "declarative agent Ready once its skill exists (runtime, skill mount, key, route)"
+    k -n "$e2e" rollout status deploy/smoke-oncall --timeout=60s >/dev/null 2>&1 || true
+    k -n "$e2e" rollout status deploy/smoke-decl-caller --timeout=60s >/dev/null 2>&1 || true
+    trace="$(random_hex 16)"
+    pod="$(k -n "$e2e" get pod -l agentory.dev/agent=smoke-decl-caller -o jsonpath='{.items[0].metadata.name}')"
+    out="$(k -n "$e2e" exec -i "$pod" -- python - "$trace" 2>&1 <<'PY' || true
+import json, os, sys, time, urllib.error, urllib.request
+trace = sys.argv[1]
+base = os.environ["AGENTORY_A2A_URL"] + "/agents/agentory-e2e/smoke-oncall"
+for attempt in range(30):  # the gateway proxy picks up a new route within seconds
+    try:
+        with urllib.request.urlopen(base + "/.well-known/agent-card.json", timeout=10) as r:
+            card = json.load(r)
+        break
+    except urllib.error.HTTPError as e:
+        if e.code != 503 or attempt == 29:
+            raise
+        time.sleep(1)
+print("SKILLS=" + ",".join(s["id"] for s in card["skills"]))
+msg = {"role": "user", "messageId": "m1", "parts": [{"kind": "text", "text": "checkout returns 500s"}]}
+req = urllib.request.Request(base + "/", method="POST", data=json.dumps(
+    {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {"message": msg}}).encode(),
+    headers={"Content-Type": "application/json", "traceparent": "00-%s-%s-01" % (trace, "b" * 16)})
+with urllib.request.urlopen(req, timeout=20) as r:
+    print("REPLY=" + json.load(r)["result"]["parts"][0]["text"])
+PY
+)"
+    if grep -q "SKILLS=k8s-triage" <<<"$out"; then pass "Agent Card advertises the skill"; else fail "card skills wrong: ${out}"; fi
+    if grep -q "REPLY=mock reply: checkout returns 500s" <<<"$out"; then
+      pass "A2A message answered by the declarative runtime through the LLM gateway"
+    else
+      fail "declarative agent did not answer: ${out}"
+    fi
+    services=""
+    for _ in $(seq 1 15); do
+      services="$(k get --raw "/api/v1/namespaces/observability/services/jaeger:16686/proxy/api/v3/traces/${trace}" 2>/dev/null \
+        | grep -oE '"stringValue":"(smoke-oncall|bifrost)"' | sort -u | tr '\n' ' ' || true)"
+      [[ "$services" == *smoke-oncall* && "$services" == *bifrost* ]] && break
+      sleep 2
+    done
+    if [[ "$services" == *smoke-oncall* && "$services" == *bifrost* ]]; then
+      pass "one trace spans the caller's request, the agent and the LLM gateway"
+    else
+      fail "trace ${trace} lacks agent or gateway spans (found: ${services:-none})"
+    fi
+  else
+    fail "declarative agent not Ready: $(k -n "$e2e" get agent smoke-oncall -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')"
+  fi
+  assert_code "$(k -n "$e2e" get agent smoke-git-skill -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')" \
+    "SkillSourceNotSupported" "git skill sources are reported, not silently ignored"
+  k -n "$e2e" delete agent smoke-oncall smoke-git-skill smoke-decl-caller --ignore-not-found --wait=false >/dev/null
+  k -n "$e2e" delete configmap smoke-skill-k8s-triage --ignore-not-found >/dev/null
+else
+  warn "skipped: operator not deployed"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"

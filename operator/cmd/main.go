@@ -101,6 +101,8 @@ func main() {
 	harnessImages := map[agentoryv1alpha1.HarnessKind]string{}
 	claudeImage := flag.String("harness-image-claude-code", "agentory-harness-claude-code:dev",
 		"Default image for harness kind claude-code (spec.harness.image overrides it)")
+	declarativeImage := flag.String("declarative-runtime-image", "agentory-declarative-runtime:dev",
+		"Image that runs declarative agents (empty disables them)")
 	flag.Parse()
 	harnessImages[agentoryv1alpha1.HarnessKindClaudeCode] = *claudeImage
 
@@ -206,7 +208,7 @@ func main() {
 	}
 
 	backends := agentruntime.NewRegistry(
-		agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways),
+		agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways).WithDeclarativeImage(*declarativeImage),
 		agentruntime.NewJobBackend(mgr.GetClient(), mgr.GetScheme(), gateways, harnessImages),
 	)
 	if err := (&controller.AgentReconciler{
