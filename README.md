@@ -30,6 +30,7 @@ Run the local dev cluster (needs Docker, kind, kubectl, helm):
 ```bash
 export ANTHROPIC_API_KEY=...   # optional, enables real model calls
 make up       # kind + Calico, Bifrost, agentgateway, OTel collector, Jaeger
+make operator-up  # build + deploy the Agentory operator (Agent/Task CRDs)
 make smoke    # end-to-end checks
 make down
 ```

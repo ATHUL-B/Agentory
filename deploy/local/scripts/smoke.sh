@@ -148,6 +148,74 @@ else
   warn "skipped: no ANTHROPIC_API_KEY or OPENAI_API_KEY configured"
 fi
 
+log "Operator (optional: make operator-up)"
+if k get crd agents.agentory.dev >/dev/null 2>&1; then
+  ns=agentory-smoke
+  if k -n agentory-operator-system rollout status deploy/agentory-operator-controller-manager --timeout=60s >/dev/null 2>&1; then
+    pass "controller running"
+  else
+    fail "controller not running"
+  fi
+
+  # Invalid spec: a harness agent must be perTask, enforced by CEL in the CRD.
+  if out="$(k -n "$ns" apply -f - 2>&1 <<'EOF'
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-invalid }
+spec:
+  runtime: harness
+  lifecycle: service
+  harness: { kind: claude-code }
+  model: { provider: mock, name: mock-model }
+EOF
+)"; then
+    fail "invalid Agent was accepted"
+    k -n "$ns" delete agent smoke-invalid --ignore-not-found >/dev/null
+  elif grep -q "requires lifecycle 'perTask'" <<<"$out"; then
+    pass "invalid Agent rejected by CRD validation"
+  else
+    fail "invalid Agent rejected for the wrong reason: ${out}"
+  fi
+
+  k -n "$ns" apply -f - >/dev/null <<'EOF'
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-agent }
+spec:
+  runtime: declarative
+  lifecycle: service
+  declarative: { instructions: "Smoke-test agent." }
+  model: { provider: mock, name: mock-model }
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Task
+metadata: { name: smoke-task }
+spec:
+  agentRef: { name: smoke-agent }
+  input: { message: "Smoke-test task." }
+EOF
+  if k -n "$ns" wait --for=condition=Accepted agent/smoke-agent --timeout=30s >/dev/null 2>&1; then
+    pass "Agent accepted by the controller"
+  else
+    fail "Agent not accepted within 30s"
+  fi
+  if k -n "$ns" wait --for=condition=AgentResolved task/smoke-task --timeout=30s >/dev/null 2>&1; then
+    pass "Task resolved its Agent"
+  else
+    fail "Task did not resolve its Agent within 30s"
+  fi
+  agent_rev="$(k -n "$ns" get agent smoke-agent -o jsonpath='{.status.revision}')"
+  task_rev="$(k -n "$ns" get task smoke-task -o jsonpath='{.status.agentRevision}')"
+  if [[ -n "$agent_rev" && "$agent_rev" == "$task_rev" ]]; then
+    pass "Task recorded the Agent revision (${agent_rev})"
+  else
+    fail "Task agentRevision '${task_rev}' != Agent revision '${agent_rev}'"
+  fi
+  k -n "$ns" delete task/smoke-task agent/smoke-agent --ignore-not-found --wait=false >/dev/null
+else
+  warn "skipped: operator not deployed"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"

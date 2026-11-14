@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Build the Agentory operator, load it into the kind cluster and deploy it
+# (CRDs, RBAC, controller). Safe to re-run; each run rolls out the new build.
+# shellcheck source=lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+require_cmd docker kind kubectl
+require_docker_running
+cluster_exists || die "cluster '${KIND_CLUSTER_NAME}' not found; run 'make up' first"
+
+OPERATOR_DIR="${REPO_DIR}/operator"
+image="${OPERATOR_IMAGE}"
+
+log "Building ${image}"
+docker build --quiet -t "${image}" "${OPERATOR_DIR}" >/dev/null
+ok "built"
+
+log "Loading into kind"
+kind load docker-image "${image}" --name "${KIND_CLUSTER_NAME}" >/dev/null
+ok "loaded"
+
+log "Deploying CRDs, RBAC and controller"
+make -s -C "${OPERATOR_DIR}" kustomize >/dev/null
+# Substitute the image in the rendered output instead of `kustomize edit`, which
+# would rewrite tracked files.
+"${OPERATOR_DIR}/bin/kustomize" build "${OPERATOR_DIR}/config/default" \
+  | sed -e "s|image: controller:latest|image: ${image}|" \
+  | k apply --server-side --force-conflicts -f - >/dev/null
+k wait --for=condition=Established crd/agents.agentory.dev crd/tasks.agentory.dev --timeout=1m >/dev/null
+# The tag is reused across builds, so restart to pick up the new image.
+k -n agentory-operator-system rollout restart deploy/agentory-operator-controller-manager >/dev/null
+k -n agentory-operator-system rollout status deploy/agentory-operator-controller-manager --timeout=3m >/dev/null
+ok "controller running"
+
+cat <<EOF
+
+Operator deployed (namespace agentory-operator-system).
+
+  Try it:  kubectl --context ${KUBE_CONTEXT} apply -f operator/config/samples/
+           kubectl --context ${KUBE_CONTEXT} get agents,tasks
+  Logs:    kubectl --context ${KUBE_CONTEXT} -n agentory-operator-system logs deploy/agentory-operator-controller-manager
+  Checks:  make smoke
+EOF
