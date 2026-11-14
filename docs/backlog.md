@@ -17,7 +17,8 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 6 | A2A route + generated Agent Card on agentgateway | P0 | todo | HLD-0001 §7 | - |
 | 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | todo | HLD-0001 §5.3 | - |
 | 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | todo | HLD-0001 §5.2 | - |
-| 9 | End-to-end demo script (four scenarios) and mock LLM for CI | P0 | todo | HLD-0001 §9 | - |
+| 9 | End-to-end demo script (four scenarios) | P0 | todo | HLD-0001 §9 | - |
+| 9a | Mock LLM provider (`mock/mock-model`) behind Bifrost: deterministic replies, tool calls, streaming, error injection; used by `make smoke` | P0 | done | HLD-0001 §9 | - |
 
 ## On-call MVP (P1)
 

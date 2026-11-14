@@ -20,6 +20,13 @@ else
   warn "shellcheck not installed; skipped"
 fi
 
+log "Unit tests"
+if python3 -m unittest discover -s "${REPO_DIR}/tools/mock-llm" -q > "${tmp}/unittest.log" 2>&1; then
+  ok "mock-llm ($(grep -oE 'Ran [0-9]+ tests' "${tmp}/unittest.log"))"
+else
+  fail "mock-llm unit tests: $(tail -5 "${tmp}/unittest.log")"
+fi
+
 log "Chart rendering with our values"
 add_helm_repos
 render_chart() {  # name, chart, version, values...
@@ -53,6 +60,8 @@ expect bifrost.yaml 'name: bifrost$' "Bifrost Service is named bifrost"
 expect bifrost.yaml 'otel-collector.observability.svc.cluster.local:4317' "Bifrost OTel plugin points at the collector"
 expect bifrost.yaml 'vk-agentory-dev' "dev virtual key rendered into Bifrost config"
 expect bifrost.yaml 'env.ANTHROPIC_API_KEY' "provider keys referenced by env var, not inlined"
+expect bifrost.yaml 'mock-llm.mock-llm.svc.cluster.local:8080' "mock provider points at the mock LLM Service"
+expect bifrost.yaml '"base_provider_type": ?"openai"' "mock provider is an OpenAI-compatible custom provider"
 
 log "OTel collector config validation"
 if command -v otelcol-contrib >/dev/null 2>&1; then
