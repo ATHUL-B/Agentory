@@ -60,6 +60,8 @@ type DeploymentBackend struct {
 	Scheme *k8sruntime.Scheme
 	Env    EnvBuilder
 	Policy PolicyBuilder
+	// DeclarativeImage runs declarative agents; empty disables them.
+	DeclarativeImage string
 }
 
 // NewDeploymentBackend wires a DeploymentBackend to the given gateways.
@@ -67,19 +69,40 @@ func NewDeploymentBackend(c client.Client, scheme *k8sruntime.Scheme, cfg Gatewa
 	return &DeploymentBackend{Client: c, Scheme: scheme, Env: EnvBuilder{Config: cfg}, Policy: PolicyBuilder{Config: cfg}}
 }
 
+// WithDeclarativeImage enables declarative agents, run from image.
+func (b *DeploymentBackend) WithDeclarativeImage(image string) *DeploymentBackend {
+	b.DeclarativeImage = image
+	return b
+}
+
 // Name implements Backend.
 func (b *DeploymentBackend) Name() string { return "deployment" }
 
-// Supports implements Backend. Declarative service agents join with backlog item 8.
+// Supports implements Backend: long-lived container agents, and declarative
+// agents when a runtime image is configured.
 func (b *DeploymentBackend) Supports(agent *agentoryv1alpha1.Agent) bool {
-	return agent.Spec.Runtime == agentoryv1alpha1.RuntimeContainer &&
-		agent.Spec.Lifecycle == agentoryv1alpha1.LifecycleService &&
-		agent.Spec.Container != nil
+	if agent.Spec.Lifecycle != agentoryv1alpha1.LifecycleService {
+		return false
+	}
+	switch agent.Spec.Runtime {
+	case agentoryv1alpha1.RuntimeContainer:
+		return agent.Spec.Container != nil
+	case agentoryv1alpha1.RuntimeDeclarative:
+		return agent.Spec.Declarative != nil && b.DeclarativeImage != ""
+	}
+	return false
 }
 
 // EnsureAgent implements Backend.
 func (b *DeploymentBackend) EnsureAgent(ctx context.Context, agent *agentoryv1alpha1.Agent, deps Deps) (AgentRuntimeStatus, error) {
 	port := servingPort(agent)
+	wl, problem, err := b.workload(ctx, agent)
+	if err != nil {
+		return AgentRuntimeStatus{}, err
+	}
+	if problem != nil {
+		return *problem, nil
+	}
 	meta := func() metav1.ObjectMeta { return metav1.ObjectMeta{Name: agent.Name, Namespace: agent.Namespace} }
 
 	sa := &corev1.ServiceAccount{ObjectMeta: meta()}
@@ -94,7 +117,7 @@ func (b *DeploymentBackend) EnsureAgent(ctx context.Context, agent *agentoryv1al
 		{sa, func() { sa.AutomountServiceAccountToken = new(false) }},
 		{policy, func() { policy.Spec = b.Policy.Build(agent, port) }},
 		{svc, func() { b.mutateService(svc, agent, port) }},
-		{deploy, func() { b.mutateDeployment(deploy, agent, deps, port) }},
+		{deploy, func() { b.mutateDeployment(deploy, agent, deps, port, wl) }},
 	}
 	for _, step := range steps {
 		if err := b.ensure(ctx, agent, step.obj, step.mutate); err != nil {
@@ -129,7 +152,8 @@ func (b *DeploymentBackend) mutateService(svc *corev1.Service, agent *agentoryv1
 	}}
 }
 
-func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agentoryv1alpha1.Agent, deps Deps, port int32) {
+func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agentoryv1alpha1.Agent, deps Deps, port int32,
+	wl workload) {
 	if d.Spec.Replicas == nil {
 		d.Spec.Replicas = new(int32(1))
 	}
@@ -146,6 +170,11 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 	} else {
 		delete(tpl.Annotations, AnnotationVirtualKeyID)
 	}
+	if wl.contentHash != "" {
+		tpl.Annotations[AnnotationContentHash] = wl.contentHash
+	} else {
+		delete(tpl.Annotations, AnnotationContentHash)
+	}
 
 	spec := &tpl.Spec
 	spec.ServiceAccountName = agent.Name
@@ -157,17 +186,14 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 	}
 
 	// The generated A2A card, mounted as a directory (not subPath) so updates
-	// reach running pods without a restart.
-	spec.Volumes = []corev1.Volume{{
-		Name: agentCardVolume,
-		VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
-			LocalObjectReference: corev1.LocalObjectReference{Name: AgentCardConfigMapName(agent)},
-			Optional:             new(true),
-			DefaultMode:          mergeDefaultMode(spec.Volumes),
-		}},
-	}}
+	// reach running pods without a restart; then any runtime-specific volumes.
+	volumes := append([]corev1.Volume{configMapVolume(agentCardVolume, AgentCardConfigMapName(agent), true)}, wl.volumes...)
+	for i := range volumes {
+		volumes[i].ConfigMap.DefaultMode = mergeDefaultMode(spec.Volumes, volumes[i].Name)
+	}
+	spec.Volumes = volumes
 
-	container := b.container(agent, deps.Revision, port)
+	container := b.container(agent, deps.Revision, port, wl)
 	if len(spec.Containers) == 1 && spec.Containers[0].Name == containerName {
 		// Mutate in place so fields the API server defaulted are kept and
 		// reconciles converge without a write.
@@ -184,10 +210,10 @@ func (b *DeploymentBackend) mutateDeployment(d *appsv1.Deployment, agent *agento
 	}
 }
 
-func (b *DeploymentBackend) container(agent *agentoryv1alpha1.Agent, revision string, port int32) corev1.Container {
-	c := agent.Spec.Container
-	env := append([]corev1.EnvVar{}, c.Env...)
+func (b *DeploymentBackend) container(agent *agentoryv1alpha1.Agent, revision string, port int32, wl workload) corev1.Container {
+	env := append([]corev1.EnvVar{}, wl.userEnv...)
 	env = append(env, b.Env.Build(agent, revision)...)
+	env = append(env, wl.runtimeEnv...)
 
 	caps := &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}}
 	if port < privilegedPortMax {
@@ -201,13 +227,13 @@ func (b *DeploymentBackend) container(agent *agentoryv1alpha1.Agent, revision st
 
 	return corev1.Container{
 		Name:      containerName,
-		Image:     c.Image,
+		Image:     wl.image,
 		Ports:     []corev1.ContainerPort{{Name: portName, ContainerPort: port, Protocol: corev1.ProtocolTCP}},
 		Env:       env,
 		Resources: resources,
-		VolumeMounts: []corev1.VolumeMount{{
+		VolumeMounts: append([]corev1.VolumeMount{{
 			Name: agentCardVolume, MountPath: AgentCardMountPath, ReadOnly: true,
-		}},
+		}}, wl.mounts...),
 		ReadinessProbe: &corev1.Probe{
 			ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(port)}},
 			PeriodSeconds: 5,
@@ -231,15 +257,23 @@ func mergeProbe(existing, desired *corev1.Probe) *corev1.Probe {
 	return merged
 }
 
-// mergeDefaultMode keeps the API server's defaulted file mode for the card
+// mergeDefaultMode keeps the API server's defaulted file mode for a ConfigMap
 // volume, so reconciles converge without a write.
-func mergeDefaultMode(existing []corev1.Volume) *int32 {
+func mergeDefaultMode(existing []corev1.Volume, name string) *int32 {
 	for _, v := range existing {
-		if v.Name == agentCardVolume && v.ConfigMap != nil {
+		if v.Name == name && v.ConfigMap != nil {
 			return v.ConfigMap.DefaultMode
 		}
 	}
 	return nil
+}
+
+func configMapVolume(volumeName, configMap string, optional bool) corev1.Volume {
+	src := &corev1.ConfigMapVolumeSource{LocalObjectReference: corev1.LocalObjectReference{Name: configMap}}
+	if optional {
+		src.Optional = new(true)
+	}
+	return corev1.Volume{Name: volumeName, VolumeSource: corev1.VolumeSource{ConfigMap: src}}
 }
 
 func deploymentStatus(d *appsv1.Deployment) AgentRuntimeStatus {
