@@ -1,0 +1,52 @@
+# Smoke-test namespace that mimics an agent workload's network lockdown
+# (ADR-0002): egress only to DNS, Bifrost and the OTel collector.
+# Image tag is substituted from versions.env by scripts/smoke.sh (CURL_IMAGE).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agentory-smoke
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-egress-lockdown
+  namespace: agentory-smoke
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: bifrost }
+      ports:
+        - { protocol: TCP, port: 8080 }
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: observability }
+          podSelector:
+            matchLabels: { app.kubernetes.io/name: opentelemetry-collector }
+      ports:
+        - { protocol: TCP, port: 4317 }
+        - { protocol: TCP, port: 4318 }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: probe
+  namespace: agentory-smoke
+spec:
+  containers:
+    - name: curl
+      image: ${CURL_IMAGE}
+      command: ["sleep", "infinity"]
+      resources:
+        requests: { cpu: 10m, memory: 16Mi }
+        limits: { memory: 64Mi }
