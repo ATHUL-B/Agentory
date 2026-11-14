@@ -27,8 +27,13 @@ log "Building declarative runtime ${DECLARATIVE_RUNTIME_IMAGE}"
 docker build --quiet -t "${DECLARATIVE_RUNTIME_IMAGE}" "${REPO_DIR}/runtime/declarative" >/dev/null
 ok "built"
 
+log "Building multi-agent example ${INCIDENT_COMMANDER_IMAGE}"
+docker build --quiet -t "${INCIDENT_COMMANDER_IMAGE}" "${REPO_DIR}/examples/incident-commander" >/dev/null
+ok "built"
+
 log "Loading images into kind"
 kind load docker-image "${image}" "${ECHO_AGENT_IMAGE}" "${HARNESS_CLAUDE_CODE_IMAGE}" "${DECLARATIVE_RUNTIME_IMAGE}" \
+  "${INCIDENT_COMMANDER_IMAGE}" \
   --name "${KIND_CLUSTER_NAME}" >/dev/null
 ok "loaded"
 
@@ -62,4 +67,5 @@ Operator deployed (namespace agentory-operator-system).
            kubectl --context ${KUBE_CONTEXT} get agents,tasks
   Logs:    kubectl --context ${KUBE_CONTEXT} -n agentory-operator-system logs deploy/agentory-operator-controller-manager
   Checks:  make smoke
+  Demo:    make demo
 EOF
