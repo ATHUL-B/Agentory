@@ -1,0 +1,7 @@
+# Local dev cluster: generated keys and values (never commit)
+deploy/local/.secrets/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

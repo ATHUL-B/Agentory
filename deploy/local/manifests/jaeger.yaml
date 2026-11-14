@@ -1,0 +1,41 @@
+# Jaeger v2 all-in-one with in-memory storage: local trace viewer only.
+# Image tag is substituted from versions.env by scripts/up.sh (JAEGER_IMAGE).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: observability
+  labels: { app.kubernetes.io/name: jaeger }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: jaeger }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: jaeger }
+    spec:
+      containers:
+        - name: jaeger
+          image: ${JAEGER_IMAGE}
+          ports:
+            - { name: ui, containerPort: 16686 }
+            - { name: otlp-grpc, containerPort: 4317 }
+            - { name: otlp-http, containerPort: 4318 }
+          readinessProbe:
+            httpGet: { path: /, port: ui }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: observability
+spec:
+  selector: { app.kubernetes.io/name: jaeger }
+  ports:
+    - { name: ui, port: 16686, targetPort: ui }
+    - { name: otlp-grpc, port: 4317, targetPort: otlp-grpc }
+    - { name: otlp-http, port: 4318, targetPort: otlp-http }
