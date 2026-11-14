@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- agentory_v1alpha1_agent.yaml
+- agentory_v1alpha1_task.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

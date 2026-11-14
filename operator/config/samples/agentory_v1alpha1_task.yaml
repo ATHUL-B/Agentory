@@ -1,0 +1,17 @@
+# Sample task for the payments-coder harness agent (agentory_v1alpha1_agent.yaml).
+# Today the operator resolves the agent and records its revision; execution
+# arrives with JobBackend (backlog item 7).
+apiVersion: agentory.dev/v1alpha1
+kind: Task
+metadata:
+  name: fix-flaky-test-8812
+  labels:
+    app.kubernetes.io/name: agentory-operator
+spec:
+  agentRef:
+    name: payments-coder
+  input:
+    message: Fix the flaky test in ledger/settle_test.go
+    data:
+      issue: PAY-8812
+  timeout: 30m

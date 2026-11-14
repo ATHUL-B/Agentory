@@ -1,0 +1,68 @@
+# Sample agents, one per runtime. All use the in-cluster mock model so they
+# work without an API key (deploy/local, `make up`).
+#
+# Today the operator validates these, records a revision and reports
+# Ready=False/BackendNotImplemented; workloads arrive in backlog items 4-8.
+
+# Type 3: declarative agent for non-developers (instructions + skills + MCP tools).
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata:
+  name: payments-oncall
+  labels:
+    app.kubernetes.io/name: agentory-operator
+spec:
+  description: On-call triage for payments services
+  runtime: declarative
+  lifecycle: service
+  declarative:
+    instructions: |
+      You are the on-call agent for the payments team. Triage the alert, check
+      recent deploys and logs, and propose a next step. Never act without approval.
+  model:
+    provider: mock
+    name: mock-model
+  tools:
+    mcpServers:
+      - name: datadog
+        tools: [query_logs, get_monitor]
+  a2a:
+    allowedCallers: ["team-sre/*"]
+---
+# Type 2: your own (multi-)agent container.
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata:
+  name: research-crew
+  labels:
+    app.kubernetes.io/name: agentory-operator
+spec:
+  runtime: container
+  lifecycle: service
+  container:
+    image: ghcr.io/example/research-crew:1.0.0
+    port: 8080
+    protocol: a2a
+  model:
+    provider: mock
+    name: mock-model
+---
+# Type 1: coding harness, one pod per Task.
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata:
+  name: payments-coder
+  labels:
+    app.kubernetes.io/name: agentory-operator
+spec:
+  runtime: harness
+  lifecycle: perTask
+  harness:
+    kind: claude-code
+    workspace:
+      git:
+        url: https://github.com/example/payments.git
+        ref: main
+  model:
+    provider: mock
+    name: mock-model
