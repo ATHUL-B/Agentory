@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -34,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	"github.com/ATHUL-B/Agentory/operator/internal/a2a"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 )
@@ -58,6 +60,8 @@ type AgentReconciler struct {
 	Backends *agentruntime.Registry
 	// VirtualKeys manages per-agent gateway keys. Nil disables key management.
 	VirtualKeys *virtualkey.Manager
+	// Routes exposes Agents over A2A on the agent gateway. Nil disables exposure.
+	Routes *a2a.RouteManager
 }
 
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents,verbs=get;list;watch;create;update;patch;delete
@@ -67,6 +71,9 @@ type AgentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create;update;patch;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create;update;patch;delete
+// +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agentgateway.dev,resources=agentgatewaybackends,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile brings an Agent's status in line with its spec.
 func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -168,6 +175,12 @@ func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1al
 		status.VirtualKeyRef = nil
 	}
 
+	if r.Routes != nil && a2a.Exposed(agent) {
+		if err := r.Routes.EnsureCard(ctx, agent, revision); err != nil {
+			return nil, nil, fmt.Errorf("agent card: %w", err)
+		}
+	}
+
 	backend, ok := r.Backends.For(agent)
 	if !ok {
 		status.Endpoints = nil
@@ -188,15 +201,55 @@ func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1al
 	r.setCondition(status, agent, ConditionEgressPolicyApplied, !conflict, egressReason(rt), egressMessage(rt))
 	r.setCondition(status, agent, ConditionWorkloadReady, rt.WorkloadReady, rt.Reason, rt.Message)
 
-	ready := rt.WorkloadReady && keyReady
-	r.setCondition(status, agent, ConditionReady, ready, rt.Reason, rt.Message)
+	route, err := r.ensureRoute(ctx, agent, rt, status)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ready := rt.WorkloadReady && keyReady && route.Ready
+	reason, message := rt.Reason, rt.Message
+	if rt.WorkloadReady && !route.Ready {
+		reason, message = route.Reason, route.Message
+	}
+	r.setCondition(status, agent, ConditionReady, ready, reason, message)
 	switch {
 	case ready:
 		status.Phase = agentoryv1alpha1.AgentPhaseReady
-	case conflict:
+	case conflict || route.Reason == a2a.ReasonResourceConflict:
 		status.Phase = agentoryv1alpha1.AgentPhaseFailed
 	}
 	return status, nil, nil
+}
+
+// ensureRoute exposes a serving Agent on the agent gateway, or removes its
+// route when it should not be exposed. The returned status is Ready when no
+// route is needed.
+func (r *AgentReconciler) ensureRoute(ctx context.Context, agent *agentoryv1alpha1.Agent,
+	rt agentruntime.AgentRuntimeStatus, status *agentoryv1alpha1.AgentStatus) (a2a.RouteStatus, error) {
+	notNeeded := a2a.RouteStatus{Ready: true}
+	if r.Routes == nil {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionGatewayRouteReady)
+		return notNeeded, nil
+	}
+	if !a2a.Exposed(agent) || rt.ServingPort == 0 {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionGatewayRouteReady)
+		if status.Endpoints != nil {
+			status.Endpoints.A2A, status.Endpoints.AgentCard = "", ""
+		}
+		return notNeeded, r.Routes.Remove(ctx, agent)
+	}
+
+	route, err := r.Routes.EnsureRoute(ctx, agent, rt.ServingPort)
+	if err != nil {
+		return route, fmt.Errorf("gateway route: %w", err)
+	}
+	if status.Endpoints == nil {
+		status.Endpoints = &agentoryv1alpha1.AgentEndpoints{}
+	}
+	status.Endpoints.A2A = a2a.URL(r.Routes.Config, agent)
+	status.Endpoints.AgentCard = status.Endpoints.A2A + a2a.CardPath
+	r.setCondition(status, agent, ConditionGatewayRouteReady, route.Ready, route.Reason, route.Message)
+	return route, nil
 }
 
 func (r *AgentReconciler) setCondition(status *agentoryv1alpha1.AgentStatus, agent *agentoryv1alpha1.Agent,
@@ -226,12 +279,17 @@ func egressMessage(rt agentruntime.AgentRuntimeStatus) string {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	b := ctrl.NewControllerManagedBy(mgr).
 		For(&agentoryv1alpha1.Agent{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ServiceAccount{}).
-		Owns(&networkingv1.NetworkPolicy{}).
-		Named("agent").
-		Complete(r)
+		Owns(&networkingv1.NetworkPolicy{})
+	if r.Routes != nil {
+		// The gateway accepts routes asynchronously; watch them to see it.
+		route := &unstructured.Unstructured{}
+		route.SetGroupVersionKind(a2a.HTTPRouteGVK)
+		b = b.Owns(route)
+	}
+	return b.Named("agent").Complete(r)
 }

@@ -14,7 +14,9 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 3 | Operator scaffold (kubebuilder), `Agent` + `Task` CRDs with CEL validation; controllers record revision/acceptance and resolve Task→Agent; `make operator-up` deploys to kind | P0 | done | HLD-0001 §3 | - |
 | 4 | `DeploymentBackend` + `runtime: container` + egress NetworkPolicy + gateway env injection | P0 | done | HLD-0001 §5.1, §6 | - |
 | 5 | Bifrost virtual key per agent (`LLMGatewayClient`): least-privilege key, Secret, rotation on loss, finalizer cleanup | P0 | done | ADR-0002, HLD-0001 §4.2 | - |
-| 6 | A2A route + generated Agent Card on agentgateway | P0 | todo | HLD-0001 §7 | - |
+| 6 | A2A route + generated Agent Card on agentgateway | P0 | done | HLD-0001 §7, §4.3 | - |
+| 6a | Enforce `a2a.allowedCallers` at the agent gateway (needs per-agent caller identity: ServiceAccount token or actor JWT, see 23) | P1 | todo | HLD needed | - |
+| 6b | MCP routing per agent: `/mcp/<ns>/<agent>` on agentgateway with the agent's `tools.mcpServers` allow-list; platform MCP server registry | P1 | todo | HLD needed | - |
 | 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | todo | HLD-0001 §5.3 | - |
 | 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | todo | HLD-0001 §5.2 | - |
 | 9 | End-to-end demo script (four scenarios) | P0 | todo | HLD-0001 §9 | - |

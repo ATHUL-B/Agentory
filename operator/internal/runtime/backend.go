@@ -57,6 +57,8 @@ type AgentRuntimeStatus struct {
 	Message string
 	// InternalEndpoint is the in-cluster address of the workload, if it has one.
 	InternalEndpoint string
+	// ServingPort is the port the workload's Service listens on (0 if none).
+	ServingPort int32
 }
 
 // Backend runs one kind of Agent. Implementations are idempotent: EnsureAgent
@@ -120,3 +122,16 @@ func VirtualKeySecretName(agent *agentoryv1alpha1.Agent) string {
 
 // VirtualKeySecretKey is the key inside VirtualKeySecretName's Secret.
 const VirtualKeySecretKey = "virtual-key"
+
+// AgentCardConfigMapName is the ConfigMap holding the Agent's generated A2A card
+// (key AgentCardFile). Workloads mount it at AgentCardMountPath; the volume is
+// optional, so agents that are not exposed simply have no card file.
+func AgentCardConfigMapName(agent *agentoryv1alpha1.Agent) string {
+	return agent.Name + "-agent-card"
+}
+
+// Agent card file name and mount location inside agent containers.
+const (
+	AgentCardFile      = "agent-card.json"
+	AgentCardMountPath = "/etc/agentory/agent-card"
+)

@@ -87,6 +87,7 @@ const (
 	EnvLLMAPIKey      = "AGENTORY_LLM_API_KEY"
 	EnvA2AURL         = "AGENTORY_A2A_URL"
 	EnvMCPURL         = "AGENTORY_MCP_URL"
+	EnvAgentCardPath  = "AGENTORY_AGENT_CARD_PATH"
 	EnvOpenAIBaseURL  = "OPENAI_BASE_URL"
 	EnvOpenAIAPIKey   = "OPENAI_API_KEY"
 	EnvAnthropicURL   = "ANTHROPIC_BASE_URL"
@@ -133,6 +134,7 @@ func (b EnvBuilder) Build(agent *agentoryv1alpha1.Agent, revision string) []core
 		corev1.EnvVar{Name: EnvAnthropicKey, ValueFrom: key.DeepCopy()},
 		corev1.EnvVar{Name: EnvA2AURL, Value: agw("")},
 		corev1.EnvVar{Name: EnvMCPURL, Value: agw(fmt.Sprintf("/mcp/%s/%s", agent.Namespace, agent.Name))},
+		corev1.EnvVar{Name: EnvAgentCardPath, Value: AgentCardMountPath + "/" + AgentCardFile},
 	)
 	return append(env, b.telemetryEnv(agent, revision)...)
 }

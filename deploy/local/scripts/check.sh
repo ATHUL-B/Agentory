@@ -21,11 +21,13 @@ else
 fi
 
 log "Unit tests"
-if python3 -m unittest discover -s "${REPO_DIR}/tools/mock-llm" -q > "${tmp}/unittest.log" 2>&1; then
-  ok "mock-llm ($(grep -oE 'Ran [0-9]+ tests' "${tmp}/unittest.log"))"
-else
-  fail "mock-llm unit tests: $(tail -5 "${tmp}/unittest.log")"
-fi
+for tool in mock-llm echo-agent; do
+  if python3 -m unittest discover -s "${REPO_DIR}/tools/${tool}" -q > "${tmp}/unittest.log" 2>&1; then
+    ok "${tool} ($(grep -oE 'Ran [0-9]+ tests' "${tmp}/unittest.log"))"
+  else
+    fail "${tool} unit tests: $(tail -5 "${tmp}/unittest.log")"
+  fi
+done
 
 log "Chart rendering with our values"
 add_helm_repos

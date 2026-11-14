@@ -14,7 +14,8 @@ Built with kubebuilder v4.16 / controller-runtime.
 | **DeploymentBackend**: `container` + `service` agents → Deployment, Service, ServiceAccount, NetworkPolicy (owned by the Agent; deleting it cleans up) | ✅ (item 4) |
 | Gateway environment injection and egress/ingress lockdown | ✅ (item 4) |
 | **Per-agent virtual keys** in Bifrost: one key per Agent, only its model, in Secret `<agent>-llm`; re-created if lost; deleted with the Agent | ✅ (item 5) |
-| A2A routes (6), harness Jobs (7), declarative runtime (8) | Backlog |
+| **A2A exposure**: generated Agent Card + agentgateway A2A backend + HTTPRoute at `/agents/<ns>/<agent>` | ✅ (item 6) |
+| Caller allow-lists (6a), MCP routing (6b), harness Jobs (7), declarative runtime (8) | Backlog |
 
 ## API at a glance
 
@@ -49,7 +50,7 @@ Full examples: [`config/samples/`](config/samples/).
 
 ### Status
 
-- `Agent.status`: `phase` (`Ready` once the workload is available and the key is ready; `Failed` on a resource conflict), `observedGeneration`, `revision` (`<name>-<10 hex>`, from a hash of the spec), `endpoints.internal`, `virtualKeyRef`, `conditions` (`Accepted`, `VirtualKeyReady`, `EgressPolicyApplied`, `WorkloadReady`, `Ready`).
+- `Agent.status`: `phase` (`Ready` once the workload is available, the key is ready and the route accepted; `Failed` on a resource conflict), `observedGeneration`, `revision` (`<name>-<10 hex>`, from a hash of the spec), `endpoints` (`a2a`, `agentCard`, `internal`), `virtualKeyRef`, `conditions` (`Accepted`, `VirtualKeyReady`, `EgressPolicyApplied`, `WorkloadReady`, `GatewayRouteReady`, `Ready`).
 - `Task.status`: `phase` (`Pending` … `Succeeded/Failed/Cancelled`), `agentRevision`, `conditions` (`AgentResolved`, `Started`), plus `traceId`, `usage`, `result` (filled by later backends).
 
 ## What a container Agent gets
@@ -120,6 +121,38 @@ Without credentials, key management is off and Agents run without
 
 If Bifrost is gone for good and an Agent is stuck deleting:
 `kubectl patch agent <name> --type=json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`.
+
+## A2A exposure
+
+Service Agents with `a2a.expose` (default `true`) are published on the agent
+gateway, so other agents and clients reach them at
+`http://agentory-gateway.agentgateway-system.svc.cluster.local:8080/agents/<namespace>/<agent>`
+(also in `status.endpoints.a2a`). The operator owns three objects per Agent:
+
+- **ConfigMap `<agent>-agent-card`**: the generated A2A Agent Card (protocol
+  0.3.0: name, description, gateway URL, version = the Agent's revision, skills
+  from `declarative.skills`). It is mounted at
+  `/etc/agentory/agent-card/agent-card.json` (`AGENTORY_AGENT_CARD_PATH`) as a
+  directory, so updates reach running pods; any A2A server can just serve it.
+- **`AgentgatewayBackend`** of type `a2a` pointing at the Agent's Service.
+- **`HTTPRoute`** on the `agentory-gateway` Gateway, matching the path prefix
+  and stripping it, so the agent serves at `/`.
+
+`GatewayRouteReady` comes from the HTTPRoute's own status (`Accepted` and
+`ResolvedRefs` from the gateway); `Ready` needs it. The gateway's proxy picks
+up a newly accepted route a few seconds later, so clients should retry a 503
+briefly. Turning `a2a.expose` off deletes the route, backend and card.
+
+The workload's network policy only admits traffic from the gateway's namespace,
+so going through the gateway is the only way to reach an agent. A direct
+pod-to-pod call is blocked.
+
+Not yet: `a2a.allowedCallers` is stored but **not enforced** (backlog 6a: it
+needs per-agent caller identity at the gateway), and MCP routes under
+`/mcp/<ns>/<agent>` don't exist yet (6b).
+
+Exposure is turned off automatically, and logged, when the Gateway API or
+agentgateway CRDs are not installed.
 
 ## Develop
 

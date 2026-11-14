@@ -39,6 +39,7 @@ const (
 	ConditionWorkloadReady       = "WorkloadReady"
 	ConditionEgressPolicyApplied = "EgressPolicyApplied"
 	ConditionVirtualKeyReady     = "VirtualKeyReady"
+	ConditionGatewayRouteReady   = "GatewayRouteReady"
 )
 
 // Condition reasons.

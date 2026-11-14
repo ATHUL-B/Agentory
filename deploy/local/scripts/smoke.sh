@@ -336,6 +336,86 @@ else
   warn "skipped: operator not deployed with Bifrost credentials"
 fi
 
+log "A2A through the agent gateway (optional: make operator-up)"
+if k get crd agents.agentory.dev >/dev/null 2>&1 && k get crd httproutes.gateway.networking.k8s.io >/dev/null 2>&1; then
+  e2e=agentory-e2e
+  for name in smoke-echo smoke-caller; do
+    k -n "$e2e" apply -f - >/dev/null <<EOF
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: ${name} }
+spec:
+  description: Smoke-test agent ${name}
+  runtime: container
+  lifecycle: service
+  container: { image: "${ECHO_AGENT_IMAGE}", port: 8080 }
+  model: { provider: mock, name: mock-model }
+EOF
+  done
+  if k -n "$e2e" wait --for=condition=Ready agent/smoke-echo agent/smoke-caller --timeout=180s >/dev/null 2>&1; then
+    pass "two A2A agents Ready (route accepted by the gateway)"
+    k -n "$e2e" rollout status deploy/smoke-echo --timeout=60s >/dev/null 2>&1 || true
+    k -n "$e2e" rollout status deploy/smoke-caller --timeout=60s >/dev/null 2>&1 || true
+    revision="$(k -n "$e2e" get agent smoke-echo -o jsonpath='{.status.revision}')"
+    pod="$(k -n "$e2e" get pod -l agentory.dev/agent=smoke-caller -o jsonpath='{.items[0].metadata.name}')"
+    # Run from inside the caller's locked-down pod, using only what the operator injected.
+    out="$(k -n "$e2e" exec -i "$pod" -- python - 2>&1 <<'PY' || true
+import json, os, time, urllib.error, urllib.request
+base = os.environ["AGENTORY_A2A_URL"] + "/agents/agentory-e2e/smoke-echo"
+# Ready means the gateway accepted the route; its proxy picks the route up a
+# few seconds later (503 until then), so retry briefly like a real client.
+for attempt in range(30):
+    try:
+        with urllib.request.urlopen(base + "/.well-known/agent-card.json", timeout=10) as r:
+            card = json.load(r)
+        break
+    except urllib.error.HTTPError as e:
+        if e.code != 503 or attempt == 29:
+            raise
+        time.sleep(1)
+print("CARD_VERSION=" + card.get("version", ""))
+print("CARD_URL_OK=" + str(card.get("url") == base))
+req = {"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {"message": {
+    "role": "user", "messageId": "m1", "parts": [{"kind": "text", "text": "smoke ping"}]}}}
+r = urllib.request.Request(base + "/", data=json.dumps(req).encode(),
+                           headers={"Content-Type": "application/json"}, method="POST")
+with urllib.request.urlopen(r, timeout=20) as resp:
+    print("REPLY=" + json.load(resp)["result"]["parts"][0]["text"])
+try:
+    urllib.request.urlopen("http://smoke-echo.agentory-e2e.svc.cluster.local:8080/healthz", timeout=5)
+    print("DIRECT=allowed")
+except Exception:
+    print("DIRECT=blocked")
+PY
+)"
+    if grep -q "CARD_VERSION=${revision}" <<<"$out" && grep -q "CARD_URL_OK=True" <<<"$out"; then
+      pass "generated Agent Card served through the gateway (version ${revision})"
+    else
+      fail "Agent Card via gateway wrong: ${out}"
+    fi
+    if grep -q "REPLY=mock reply: smoke ping" <<<"$out"; then
+      pass "agent-to-agent message/send via gateway -> echo -> LLM gateway -> model"
+    else
+      fail "A2A call failed: ${out}"
+    fi
+    if grep -q "DIRECT=blocked" <<<"$out"; then
+      pass "direct agent-to-agent call bypassing the gateway is blocked"
+    else
+      fail "direct call was not blocked: ${out}"
+    fi
+  else
+    fail "A2A agents not Ready: $(k -n "$e2e" get agent smoke-echo -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')"
+  fi
+  k -n "$e2e" delete agent smoke-echo smoke-caller --ignore-not-found --timeout=60s >/dev/null 2>&1
+  if k -n "$e2e" get httproute smoke-echo >/dev/null 2>&1; then
+    fail "route left behind after deleting the Agent"
+  else
+    pass "deleting the Agent removed its route"
+  fi
+else
+  warn "skipped: operator or Gateway API not installed"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"

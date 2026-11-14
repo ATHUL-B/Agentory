@@ -26,11 +26,13 @@ import (
 	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	"github.com/ATHUL-B/Agentory/operator/internal/a2a"
 	gatewayfake "github.com/ATHUL-B/Agentory/operator/internal/llmgateway/fake"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
@@ -276,6 +278,106 @@ var _ = Describe("Agent controller", func() {
 			err = k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &agentoryv1alpha1.Agent{})
 			Expect(err).To(HaveOccurred(), "agent must not be stuck on the finalizer")
 			Expect(gw.Len()).To(Equal(1), "the key is left for an operator with credentials to clean up")
+		})
+	})
+
+	Context("with A2A exposure", func() {
+		BeforeEach(func() {
+			cfg := agentruntime.DefaultGatewayConfig()
+			reconciler.Backends = agentruntime.NewRegistry(agentruntime.NewDeploymentBackend(k8sClient, k8sClient.Scheme(), cfg))
+			reconciler.Routes = a2a.NewRouteManager(k8sClient, k8sClient.Scheme(), cfg)
+		})
+
+		exposedAgent := func(name string) *agentoryv1alpha1.Agent {
+			return newDeclarativeAgent(name, func(a *agentoryv1alpha1.Agent) {
+				a.Spec.Runtime = agentoryv1alpha1.RuntimeContainer
+				a.Spec.Declarative = nil
+				a.Spec.Container = &agentoryv1alpha1.ContainerSpec{Image: "ghcr.io/example/echo:1.0.0"}
+			})
+		}
+		markDeploymentAvailable := func(agent *agentoryv1alpha1.Agent) {
+			var deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &deploy)).To(Succeed())
+			deploy.Status = appsv1.DeploymentStatus{ObservedGeneration: deploy.Generation, Replicas: 1,
+				UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1}
+			Expect(k8sClient.Status().Update(ctx, &deploy)).To(Succeed())
+		}
+		getRoute := func(agent *agentoryv1alpha1.Agent) (*unstructured.Unstructured, error) {
+			route := &unstructured.Unstructured{}
+			route.SetGroupVersionKind(a2a.HTTPRouteGVK)
+			return route, k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), route)
+		}
+
+		It("routes the agent through the gateway once the gateway accepts it", func() {
+			agent := exposedAgent(uniqueName("echo"))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+
+			reconcileAgent(agent)
+			markDeploymentAvailable(agent)
+			got := reconcileAgent(agent)
+
+			By("waiting on the gateway while the workload is already available")
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionWorkloadReady)).To(BeTrue())
+			cond := meta.FindStatusCondition(got.Status.Conditions, ConditionGatewayRouteReady)
+			Expect(cond.Reason).To(Equal(a2a.ReasonRoutePending))
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionReady)).To(BeFalse())
+			Expect(got.Status.Endpoints.A2A).To(Equal(
+				"http://agentory-gateway.agentgateway-system.svc.cluster.local:8080/agents/" + testNamespace + "/" + agent.Name))
+			Expect(got.Status.Endpoints.AgentCard).To(Equal(got.Status.Endpoints.A2A + "/.well-known/agent-card.json"))
+
+			By("the card is generated and mounted into the pod")
+			var cm corev1.ConfigMap
+			Expect(k8sClient.Get(ctx, client.ObjectKey{Namespace: testNamespace, Name: agent.Name + "-agent-card"}, &cm)).To(Succeed())
+			Expect(cm.Data[agentruntime.AgentCardFile]).To(ContainSubstring(got.Status.Endpoints.A2A))
+			var deploy appsv1.Deployment
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &deploy)).To(Succeed())
+			Expect(deploy.Spec.Template.Spec.Volumes[0].ConfigMap.Name).To(Equal(agent.Name + "-agent-card"))
+			Expect(deploy.Spec.Template.Spec.Containers[0].VolumeMounts[0].MountPath).To(Equal(agentruntime.AgentCardMountPath))
+
+			By("the gateway accepts the route")
+			route, err := getRoute(agent)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(metav1.IsControlledBy(route, got)).To(BeTrue())
+			Expect(unstructured.SetNestedSlice(route.Object, []any{map[string]any{
+				"parentRef":      map[string]any{"name": "agentory-gateway", "namespace": "agentgateway-system"},
+				"controllerName": "agentgateway.dev/agentgateway",
+				"conditions": []any{
+					map[string]any{"type": "Accepted", "status": "True", "reason": "Accepted", "message": "",
+						"lastTransitionTime": "2026-11-14T00:00:00Z"},
+					map[string]any{"type": "ResolvedRefs", "status": "True", "reason": "ResolvedRefs", "message": "",
+						"lastTransitionTime": "2026-11-14T00:00:00Z"},
+				},
+			}}, "status", "parents")).To(Succeed())
+			Expect(k8sClient.Status().Update(ctx, route)).To(Succeed())
+
+			got = reconcileAgent(agent)
+			Expect(meta.IsStatusConditionTrue(got.Status.Conditions, ConditionGatewayRouteReady)).To(BeTrue())
+			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhaseReady))
+		})
+
+		It("removes the route when exposure is turned off", func() {
+			agent := exposedAgent(uniqueName("private"))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			DeferCleanup(k8sClient.Delete, ctx, agent)
+			reconcileAgent(agent)
+			_, err := getRoute(agent)
+			Expect(err).NotTo(HaveOccurred())
+
+			var current agentoryv1alpha1.Agent
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(agent), &current)).To(Succeed())
+			current.Spec.A2A = &agentoryv1alpha1.A2ASpec{Expose: new(false)}
+			Expect(k8sClient.Update(ctx, &current)).To(Succeed())
+			reconcileAgent(agent) // rolls the deployment to the new revision
+			markDeploymentAvailable(agent)
+
+			got := reconcileAgent(agent)
+			_, err = getRoute(agent)
+			Expect(client.IgnoreNotFound(err)).To(Succeed())
+			Expect(err).To(HaveOccurred(), "route must be deleted")
+			Expect(meta.FindStatusCondition(got.Status.Conditions, ConditionGatewayRouteReady)).To(BeNil())
+			Expect(got.Status.Endpoints.A2A).To(BeEmpty())
+			Expect(got.Status.Phase).To(Equal(agentoryv1alpha1.AgentPhaseReady), "an unexposed agent is ready without a route")
 		})
 	})
 })

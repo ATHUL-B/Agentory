@@ -27,6 +27,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -38,6 +39,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	"github.com/ATHUL-B/Agentory/operator/internal/a2a"
 	"github.com/ATHUL-B/Agentory/operator/internal/controller"
 	"github.com/ATHUL-B/Agentory/operator/internal/llmgateway"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
@@ -188,9 +190,11 @@ func main() {
 		// main exits as soon as the manager stops, so releasing is safe; it cuts the
 		// hand-over after a rollout from the lease duration (~15s) to near zero.
 		LeaderElectionReleaseOnCancel: true,
-		// Read Secrets straight from the API server: caching them would mean
-		// watching, and holding in memory, every Secret in the cluster.
-		Client: client.Options{Cache: &client.CacheOptions{DisableFor: []client.Object{&corev1.Secret{}}}},
+		// Read Secrets and ConfigMaps straight from the API server: caching them
+		// would mean watching, and holding in memory, every one in the cluster.
+		Client: client.Options{Cache: &client.CacheOptions{
+			DisableFor: []client.Object{&corev1.Secret{}, &corev1.ConfigMap{}},
+		}},
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -204,6 +208,7 @@ func main() {
 			agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways),
 		),
 		VirtualKeys: virtualKeyManager(mgr, gateways),
+		Routes:      routeManager(mgr, gateways),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agent")
 		os.Exit(1)
@@ -268,4 +273,17 @@ func virtualKeyManager(mgr ctrl.Manager, gateways agentruntime.GatewayConfig) *v
 		Scheme:  mgr.GetScheme(),
 		Gateway: llmgateway.NewBifrostClient(baseURL, user, pass, nil),
 	}
+}
+
+// routeManager returns the A2A route manager, or nil (exposure disabled) when
+// the Gateway API or agentgateway CRDs are not installed.
+func routeManager(mgr ctrl.Manager, gateways agentruntime.GatewayConfig) *a2a.RouteManager {
+	for _, gvk := range []schema.GroupVersionKind{a2a.HTTPRouteGVK, a2a.BackendGVK} {
+		if _, err := mgr.GetRESTMapper().RESTMapping(gvk.GroupKind(), gvk.Version); err != nil {
+			setupLog.Info("A2A exposure disabled: API not installed", "kind", gvk.String(), "error", err.Error())
+			return nil
+		}
+	}
+	setupLog.Info("A2A exposure enabled", "gateway", gateways.AgentGateway.String())
+	return a2a.NewRouteManager(mgr.GetClient(), mgr.GetScheme(), gateways)
 }

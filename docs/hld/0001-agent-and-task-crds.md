@@ -237,6 +237,24 @@ are level-triggered and safe to retry.
 - Bifrost must run with `sourceOfTruth: split`. `config.json` mode prunes
   API-created keys at every start-up (verified).
 
+### 4.3 Implemented (item 6): A2A exposure
+
+- `internal/a2a.RouteManager`: `EnsureCard` (before the backend, so the
+  workload can mount it), `EnsureRoute` (after, once the Service exists) and
+  `Remove` (when `a2a.expose` is false). The objects are unstructured
+  (`HTTPRoute` gateway.networking.k8s.io/v1, `AgentgatewayBackend`
+  agentgateway.dev/v1alpha1 with `spec.a2a{host,port}`), so there are no new Go
+  module dependencies.
+- Verified with agentgateway v1.4.1: the route's `URLRewrite` strips
+  `/agents/<ns>/<agent>`; the A2A backend rewrites the card's `url` to the
+  gateway address; the proxy serves 503 for a few seconds after a route is
+  accepted.
+- `internal/ownership.Ensure/Delete` is the shared create-or-update that never
+  adopts foreign objects, now used by the backend, the key manager and the
+  route manager.
+- Exposure needs the CRDs. The operator checks the REST mapper at start-up and
+  disables exposure otherwise. ConfigMaps, like Secrets, are read uncached.
+
 ## 5. Runtimes
 
 ### 5.1 Container (`runtime: container`)
@@ -294,8 +312,9 @@ projected ServiceAccount tokens. Actor-chain JWTs are backlog.
 - Each `a2a.expose: true` agent gets a gateway route
   `/agents/{namespace}/{name}` and a generated Agent Card (name, description,
   skills, input/output modes, auth).
-- Agents call each other only via `AGENTORY_A2A_URL`; `allowedCallers` is
-  enforced by the gateway.
+- Agents call each other only via `AGENTORY_A2A_URL` (direct calls are blocked
+  by the network policy). `allowedCallers` enforcement at the gateway is
+  backlog item 6a.
 - `traceparent` is propagated so multi-agent calls form one trace.
 
 ## 8. Observability and replay
