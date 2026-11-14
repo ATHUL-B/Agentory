@@ -4,8 +4,9 @@
 # All three run today. Apply skill_k8s_triage.yaml first (or the whole
 # directory): the declarative agent waits for its skill.
 
-# Type 3: declarative agent for non-developers: instructions + skills, no code.
-# (MCP tools are listed for the future: routing them is backlog 6b.)
+# Type 3: declarative agent for non-developers: instructions + skills + MCP
+# tools, no code. Its tools come from the "oncall" MCPServer
+# (agentory_v1alpha1_mcpserver.yaml), limited to two of its three tools.
 apiVersion: agentory.dev/v1alpha1
 kind: Agent
 metadata:
@@ -30,8 +31,8 @@ spec:
     name: mock-model
   tools:
     mcpServers:
-      - name: datadog
-        tools: [query_logs, get_monitor]
+      - name: oncall
+        tools: [get_recent_deploys, get_error_rate]
   a2a:
     allowedCallers: ["team-sre/*"]
 ---

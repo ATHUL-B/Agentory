@@ -88,6 +88,7 @@ const (
 	EnvA2AURL         = "AGENTORY_A2A_URL"
 	EnvMCPURL         = "AGENTORY_MCP_URL"
 	EnvAgentCardPath  = "AGENTORY_AGENT_CARD_PATH"
+	EnvMCPEnabled     = "AGENTORY_MCP_ENABLED"
 	EnvOpenAIBaseURL  = "OPENAI_BASE_URL"
 	EnvOpenAIAPIKey   = "OPENAI_API_KEY"
 	EnvAnthropicURL   = "ANTHROPIC_BASE_URL"
@@ -135,6 +136,8 @@ func (b EnvBuilder) Build(agent *agentoryv1alpha1.Agent, revision string) []core
 		corev1.EnvVar{Name: EnvA2AURL, Value: agw("")},
 		corev1.EnvVar{Name: EnvMCPURL, Value: agw(fmt.Sprintf("/mcp/%s/%s", agent.Namespace, agent.Name))},
 		corev1.EnvVar{Name: EnvAgentCardPath, Value: AgentCardMountPath + "/" + AgentCardFile},
+		// AGENTORY_MCP_URL is only routed when the Agent lists MCP servers.
+		corev1.EnvVar{Name: EnvMCPEnabled, Value: strconv.FormatBool(hasTools(agent))},
 	)
 	return append(env, b.telemetryEnv(agent, revision)...)
 }
@@ -154,6 +157,11 @@ func (b EnvBuilder) telemetryEnv(agent *agentoryv1alpha1.Agent, revision string)
 		{Name: EnvOTelService, Value: agent.Name},
 		{Name: EnvOTelAttributes, Value: attrs},
 	}
+}
+
+// hasTools reports whether the Agent lists MCP servers.
+func hasTools(agent *agentoryv1alpha1.Agent) bool {
+	return agent.Spec.Tools != nil && len(agent.Spec.Tools.MCPServers) > 0
 }
 
 // ParseServiceRef parses "namespace/name:port", the format of the operator's

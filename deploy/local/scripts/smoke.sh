@@ -614,6 +614,149 @@ else
   warn "skipped: operator not deployed"
 fi
 
+log "MCP tools through the agent gateway (optional: make operator-up)"
+if k get crd mcpservers.agentory.dev >/dev/null 2>&1 && k get crd agentgatewaypolicies.agentgateway.dev >/dev/null 2>&1; then
+  e2e=agentory-e2e
+  k create namespace agentory-mcp --dry-run=client -o yaml | k apply -f - >/dev/null
+  k apply -f - >/dev/null <<'EOF'
+apiVersion: agentory.dev/v1alpha1
+kind: MCPServer
+metadata: { name: smoke-oncall, namespace: agentory-mcp }
+spec:
+  url: http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp
+  description: Demo on-call data
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-tools, namespace: agentory-e2e }
+spec:
+  runtime: declarative
+  lifecycle: service
+  declarative: { instructions: "You are the payments on-call agent." }
+  model: { provider: mock, name: mock-model }
+  tools:
+    mcpServers:
+      - name: smoke-oncall
+        tools: [get_recent_deploys, get_error_rate]
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-tools-missing, namespace: agentory-e2e }
+spec:
+  runtime: declarative
+  lifecycle: service
+  declarative: { instructions: "Uses an MCP server nobody registered." }
+  model: { provider: mock, name: mock-model }
+  tools:
+    mcpServers: [{ name: not-registered }]
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-tools-coder, namespace: agentory-e2e }
+spec:
+  runtime: harness
+  lifecycle: perTask
+  harness: { kind: claude-code }
+  model: { provider: mock, name: mock-model }
+  tools:
+    mcpServers: [{ name: smoke-oncall, tools: [get_error_rate] }]
+EOF
+  if k -n "$e2e" wait --for=condition=Ready agent/smoke-tools --timeout=180s >/dev/null 2>&1; then
+    pass "agent with a registry MCPServer Ready (ToolsReady: backend, route and policy on the gateway)"
+    k -n "$e2e" rollout status deploy/smoke-tools --timeout=60s >/dev/null 2>&1 || true
+    pod="$(k -n "$e2e" get pod -l agentory.dev/agent=smoke-tools -o jsonpath='{.items[0].metadata.name}')"
+    # From inside the agent's pod, with only its injected AGENTORY_MCP_URL.
+    out="$(k -n "$e2e" exec -i "$pod" -- python - 2>&1 <<'PY' || true
+import os, sys, time
+sys.path.insert(0, "/app")
+from runtime import MCPClient, RpcError
+c = MCPClient(os.environ["AGENTORY_MCP_URL"])
+for attempt in range(30):  # the gateway proxy picks up a new route within seconds
+    try:
+        tools = c.list_tools()
+        break
+    except RpcError as e:
+        if "503" not in e.message or attempt == 29:
+            raise
+        c.reset()
+        time.sleep(1)
+print("TOOLS=" + ",".join(sorted(t["name"] for t in tools)))
+print("ALLOWED=" + c.call_tool("smoke-oncall_get_recent_deploys", {"service": "checkout"})["content"][0]["text"].splitlines()[0])
+try:
+    c.call_tool("smoke-oncall_get_pod_events", {"service": "checkout"})
+    print("DENIED=no")
+except RpcError:
+    print("DENIED=yes")
+PY
+)"
+    if grep -q "TOOLS=smoke-oncall_get_error_rate,smoke-oncall_get_recent_deploys" <<<"$out"; then
+      pass "gateway lists only the agent's allowed tools"
+    else
+      fail "unexpected tool list: ${out}"
+    fi
+    if grep -q "ALLOWED=v2.31.0" <<<"$out"; then pass "allowed tool call returns data"; else fail "allowed call failed: ${out}"; fi
+    if grep -q "DENIED=yes" <<<"$out"; then
+      pass "a tool outside the allow-list is rejected by the gateway"
+    else
+      fail "disallowed tool was callable: ${out}"
+    fi
+
+    # A2A request: the model (mock directive) picks a tool; the runtime calls it over MCP.
+    answer="$(k -n "$e2e" exec -i "$pod" -- python - 2>&1 <<'PY' || true
+import json, time, urllib.error, urllib.request
+text = 'What changed? [[tool:smoke-oncall_get_recent_deploys {"service": "checkout"}]]'
+body = {"jsonrpc": "2.0", "id": 1, "method": "message/send",
+        "params": {"message": {"role": "user", "messageId": "m1", "parts": [{"kind": "text", "text": text}]}}}
+req = urllib.request.Request("http://127.0.0.1:8080/", data=json.dumps(body).encode(), method="POST",
+                             headers={"Content-Type": "application/json"})
+with urllib.request.urlopen(req, timeout=30) as r:
+    print("ANSWER=" + json.load(r)["result"]["parts"][0]["text"].replace("\n", " "))
+PY
+)"
+    if grep -q "ANSWER=mock reply: tool smoke-oncall_get_recent_deploys returned: v2.31.0" <<<"$answer"; then
+      pass "declarative agent answered using its MCP tool"
+    else
+      fail "agent did not use its tool: ${answer}"
+    fi
+  else
+    fail "tools agent not Ready: $(k -n "$e2e" get agent smoke-tools -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')"
+  fi
+  sleep 2
+  assert_code "$(k -n "$e2e" get agent smoke-tools-missing -o jsonpath='{.status.conditions[?(@.type=="ToolsReady")].reason}')" \
+    "MCPServerNotFound" "an unregistered MCP server is reported"
+
+  if k -n "$e2e" wait --for=condition=Ready agent/smoke-tools-coder --timeout=120s >/dev/null 2>&1; then
+    k -n "$e2e" apply -f - >/dev/null <<'EOF'
+apiVersion: agentory.dev/v1alpha1
+kind: Task
+metadata: { name: smoke-tools-task }
+spec:
+  agentRef: { name: smoke-tools-coder }
+  input:
+    message: 'How bad is checkout? [[tool:mcp__agentory__smoke-oncall_get_error_rate {"service": "checkout"}]]'
+  timeout: 5m
+EOF
+    for _ in $(seq 1 90); do
+      phase="$(k -n "$e2e" get task smoke-tools-task -o jsonpath='{.status.phase}' 2>/dev/null)"
+      [[ "$phase" == Succeeded || "$phase" == Failed ]] && break
+      sleep 2
+    done
+    summary="$(k -n "$e2e" get task smoke-tools-task -o jsonpath='{.status.result.summary}' 2>/dev/null)"
+    if [[ "$phase" == Succeeded && "$summary" == *"18.4%"* ]]; then
+      pass "Claude Code harness used the agent's MCP tool through the gateway"
+    else
+      fail "harness MCP task ${phase:-unfinished}: ${summary}"
+    fi
+    k -n "$e2e" delete task smoke-tools-task --ignore-not-found --wait=false >/dev/null
+  else
+    fail "harness tools agent not Ready"
+  fi
+  k -n "$e2e" delete agent smoke-tools smoke-tools-missing smoke-tools-coder --ignore-not-found --wait=false >/dev/null
+  k -n agentory-mcp delete mcpserver smoke-oncall --ignore-not-found >/dev/null
+else
+  warn "skipped: operator or agentgateway policies not installed"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"

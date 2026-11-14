@@ -4,6 +4,7 @@
 resources:
 - bases/agentory.dev_agents.yaml
 - bases/agentory.dev_tasks.yaml
+- bases/agentory.dev_mcpservers.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

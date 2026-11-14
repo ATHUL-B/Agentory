@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import unittest
 import urllib.request
@@ -12,6 +13,8 @@ from runtime import (
     INVALID_PARAMS,
     METHOD_NOT_FOUND,
     ChatClient,
+    MCPClient,
+    MCPToolProvider,
     ConversationStore,
     DeclarativeAgent,
     PromptBuilder,
@@ -180,7 +183,7 @@ class AgentTest(unittest.TestCase):
             def definitions(self):
                 return [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
 
-            def call(self, name, arguments):
+            def call(self, name, arguments, traceparent=""):
                 return f"{name}({arguments}) = 42"
         chat = FakeChat(replies=[
             ({"role": "assistant", "content": None, "tool_calls": [
@@ -241,6 +244,118 @@ class TracerTest(unittest.TestCase):
         sent = []
         Tracer("", "s", {}, send=lambda u, d: sent.append(u)).start("x", None, {}).end()
         self.assertEqual(sent, [])
+
+
+class FakeMCP(BaseHTTPRequestHandler):
+    """A tiny MCP server; class attributes switch its behaviour per test."""
+    sse = False
+    seen = []
+    tools = [{"name": "oncall_get_recent_deploys", "description": "Recent deploys",
+              "inputSchema": {"type": "object", "properties": {"service": {"type": "string"}}}}]
+
+    def do_POST(self):  # noqa: N802
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        FakeMCP.seen.append({"method": body["method"], "session": self.headers.get("Mcp-Session-Id"),
+                             "traceparent": self.headers.get("traceparent")})
+        if "id" not in body:
+            self.send_response(202)
+            self.end_headers()
+            return
+        method, params = body["method"], body.get("params") or {}
+        if method == "initialize":
+            result = {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "fake"}}
+        elif method == "tools/list":
+            result = {"tools": FakeMCP.tools}
+        elif method == "tools/call" and params["name"] == "oncall_get_recent_deploys":
+            result = {"content": [{"type": "text", "text": "v2.31.0 12 minutes ago by alice"}], "isError": False}
+        elif method == "tools/call":
+            result = {"content": [{"type": "text", "text": "unknown service"}], "isError": True}
+        else:
+            result = None
+        msg = {"jsonrpc": "2.0", "id": body["id"], "result": result} if result is not None else \
+            {"jsonrpc": "2.0", "id": body["id"], "error": {"code": -32601, "message": "nope"}}
+        self.send_response(200)
+        if method == "initialize":
+            self.send_header("Mcp-Session-Id", "sess-1")
+        if FakeMCP.sse:
+            data = ("event: message\ndata: " + json.dumps(msg) + "\n\n").encode()
+            self.send_header("Content-Type", "text/event-stream")
+        else:
+            data = json.dumps(msg).encode()
+            self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+class MCPTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeMCP)
+        cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}/mcp/team/agent"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        FakeMCP.sse = False
+        FakeMCP.seen = []
+
+    def test_session_list_and_call(self):
+        client = MCPClient(self.url)
+        tools = client.list_tools(PARENT)
+        self.assertEqual([t["name"] for t in tools], ["oncall_get_recent_deploys"])
+        result = client.call_tool("oncall_get_recent_deploys", {"service": "checkout"}, PARENT)
+        self.assertEqual(result["content"][0]["text"], "v2.31.0 12 minutes ago by alice")
+        self.assertEqual([s["method"] for s in FakeMCP.seen],
+                         ["initialize", "notifications/initialized", "tools/list", "tools/call"])
+        self.assertIsNone(FakeMCP.seen[0]["session"])
+        self.assertEqual({s["session"] for s in FakeMCP.seen[1:]}, {"sess-1"}, "session id reused")
+        self.assertEqual(FakeMCP.seen[-1]["traceparent"], PARENT, "trace continues to the gateway")
+
+    def test_sse_responses(self):
+        FakeMCP.sse = True
+        self.assertEqual(len(MCPClient(self.url).list_tools()), 1)
+
+    def test_provider_definitions_and_calls(self):
+        provider = MCPToolProvider(MCPClient(self.url))
+        defs = provider.definitions()
+        self.assertEqual(defs[0]["function"]["name"], "oncall_get_recent_deploys")
+        self.assertEqual(defs[0]["function"]["parameters"]["properties"]["service"]["type"], "string")
+        self.assertEqual(provider.call("oncall_get_recent_deploys", '{"service": "checkout"}'),
+                         "v2.31.0 12 minutes ago by alice")
+        self.assertEqual(provider.call("oncall_other", "{}"), "Error: unknown service")
+        self.assertTrue(provider.call("x", "not json").startswith("Error:"))
+
+    def test_unreachable_gateway_means_no_tools_not_failure(self):
+        provider = MCPToolProvider(MCPClient("http://127.0.0.1:9/mcp", timeout=1))
+        self.assertEqual(provider.definitions(), [])
+        self.assertTrue(provider.call("anything", "{}").startswith("Error:"))
+
+    def test_agent_uses_mcp_tools_end_to_end(self):
+        chat = FakeChat(replies=[
+            ({"role": "assistant", "content": None, "tool_calls": [{"id": "c1", "type": "function", "function": {
+                "name": "oncall_get_recent_deploys", "arguments": '{"service": "checkout"}'}}]}, {}),
+            ({"role": "assistant", "content": "The 12-minute-old deploy v2.31.0 is the likely cause."}, {}),
+        ])
+        agent = agent_with(chat, tools=MCPToolProvider(MCPClient(self.url)))
+        resp = agent.handle(send("why is checkout failing?"))
+        self.assertEqual(resp["result"]["parts"][0]["text"], "The 12-minute-old deploy v2.31.0 is the likely cause.")
+        self.assertEqual(chat.calls[0]["tools"][0]["function"]["name"], "oncall_get_recent_deploys")
+        tool_msg = chat.calls[1]["messages"][-1]
+        self.assertEqual((tool_msg["role"], tool_msg["content"]), ("tool", "v2.31.0 12 minutes ago by alice"))
+
+    def test_config_reads_mcp_flag(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"instructions": "x", "mcp": True}, f)
+        self.addCleanup(os.remove, f.name)
+        self.assertTrue(RuntimeConfig.load(f.name, SkillLoader()).mcp)
 
 
 class HttpTest(unittest.TestCase):

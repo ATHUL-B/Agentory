@@ -15,6 +15,7 @@ Optional:
   AGENTORY_HARNESS_ALLOWED_TOOLS            default "Read,Edit,Write,Bash"
   AGENTORY_HARNESS_MAX_TURNS                cap on agent turns
   AGENTORY_WORKSPACE                        default /workspace
+  AGENTORY_MCP_ENABLED, AGENTORY_MCP_URL    the agent's MCP tools on the agent gateway
 """
 
 import json
@@ -30,6 +31,8 @@ TERMINATION_LOG = "/dev/termination-log"
 MAX_RESULT_BYTES = 4000
 MAX_ARTIFACTS = 20
 DEFAULT_TOOLS = "Read,Edit,Write,Bash"
+# Name of the agent gateway's MCP server inside Claude Code (tools: mcp__agentory__<server>_<tool>).
+MCP_SERVER_NAME = "agentory"
 
 
 @dataclass
@@ -40,6 +43,7 @@ class TaskConfig:
     workspace: str = "/workspace"
     allowed_tools: str = DEFAULT_TOOLS
     max_turns: Optional[int] = None
+    mcp_url: str = ""
 
     @classmethod
     def from_env(cls, env: Dict[str, str]) -> "TaskConfig":
@@ -57,6 +61,7 @@ class TaskConfig:
             workspace=env.get("AGENTORY_WORKSPACE", "/workspace"),
             allowed_tools=env.get("AGENTORY_HARNESS_ALLOWED_TOOLS", DEFAULT_TOOLS),
             max_turns=int(turns) if turns else None,
+            mcp_url=env.get("AGENTORY_MCP_URL", "") if env.get("AGENTORY_MCP_ENABLED") == "true" else "",
         )
 
 
@@ -156,6 +161,12 @@ class ClaudeCode:
         ]
         if cfg.max_turns:
             cmd += ["--max-turns", str(cfg.max_turns)]
+        if cfg.mcp_url:
+            # The gateway already limits the tools to the Agent's allow-list, so
+            # pre-approve the whole server.
+            mcp_config = {"mcpServers": {MCP_SERVER_NAME: {"type": "http", "url": cfg.mcp_url}}}
+            cmd += ["--mcp-config", json.dumps(mcp_config)]
+            cmd[cmd.index("--allowedTools") + 1] += f",mcp__{MCP_SERVER_NAME}"
         return cmd
 
     @staticmethod

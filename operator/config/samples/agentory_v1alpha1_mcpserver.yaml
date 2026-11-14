@@ -1,0 +1,14 @@
+# An MCP server in the tool registry. Agents use it by name in
+# spec.tools.mcpServers: the operator looks the name up in the Agent's namespace,
+# then in the platform registry namespace (--mcp-registry-namespace, default
+# agentory-mcp), so platform teams can publish tools once for every team.
+# This one is the local demo server (deploy/local, `make up`).
+apiVersion: agentory.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: oncall
+  labels:
+    app.kubernetes.io/name: agentory-operator
+spec:
+  url: http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp
+  description: Recent deploys, pod events and error rates per service (demo data)

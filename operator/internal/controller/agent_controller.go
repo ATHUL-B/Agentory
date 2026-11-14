@@ -36,6 +36,7 @@ import (
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 	"github.com/ATHUL-B/Agentory/operator/internal/a2a"
+	"github.com/ATHUL-B/Agentory/operator/internal/mcp"
 	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 	"github.com/ATHUL-B/Agentory/operator/internal/virtualkey"
 )
@@ -65,6 +66,8 @@ type AgentReconciler struct {
 	VirtualKeys *virtualkey.Manager
 	// Routes exposes Agents over A2A on the agent gateway. Nil disables exposure.
 	Routes *a2a.RouteManager
+	// Tools routes Agents' MCP servers through the agent gateway. Nil disables tools.
+	Tools *mcp.Manager
 }
 
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents,verbs=get;list;watch;create;update;patch;delete
@@ -77,6 +80,8 @@ type AgentReconciler struct {
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;create;update;patch;delete
 // +kubebuilder:rbac:groups=gateway.networking.k8s.io,resources=httproutes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentgateway.dev,resources=agentgatewaybackends,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agentgateway.dev,resources=agentgatewaypolicies,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=agentory.dev,resources=mcpservers,verbs=get;list;watch
 
 // Reconcile brings an Agent's status in line with its spec.
 func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -198,6 +203,11 @@ func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1al
 		return status, nil, nil
 	}
 
+	tools, err := r.ensureTools(ctx, agent, status)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	rt, err := backend.EnsureAgent(ctx, agent, deps)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s backend: %w", backend.Name(), err)
@@ -214,19 +224,44 @@ func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1al
 		return nil, nil, err
 	}
 
-	ready := rt.WorkloadReady && keyReady && route.Ready
+	ready := rt.WorkloadReady && keyReady && route.Ready && tools.Ready
 	reason, message := rt.Reason, rt.Message
-	if rt.WorkloadReady && !route.Ready {
+	switch {
+	case !rt.WorkloadReady:
+	case !route.Ready:
 		reason, message = route.Reason, route.Message
+	case !tools.Ready:
+		reason, message = tools.Reason, tools.Message
 	}
 	r.setCondition(status, agent, ConditionReady, ready, reason, message)
 	switch {
 	case ready:
 		status.Phase = agentoryv1alpha1.AgentPhaseReady
-	case conflict || route.Reason == a2a.ReasonResourceConflict:
+	case conflict || route.Reason == a2a.ReasonResourceConflict || tools.Reason == mcp.ReasonResourceConflict:
 		status.Phase = agentoryv1alpha1.AgentPhaseFailed
 	}
 	return status, nil, nil
+}
+
+// ensureTools routes the Agent's MCP servers through the agent gateway, or
+// removes its tool route when it lists none. The status is Ready when no tools are needed.
+func (r *AgentReconciler) ensureTools(ctx context.Context, agent *agentoryv1alpha1.Agent,
+	status *agentoryv1alpha1.AgentStatus) (mcp.ToolsStatus, error) {
+	notNeeded := mcp.ToolsStatus{Ready: true}
+	if r.Tools == nil {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionToolsReady)
+		return notNeeded, nil
+	}
+	if !mcp.HasTools(agent) {
+		meta.RemoveStatusCondition(&status.Conditions, ConditionToolsReady)
+		return notNeeded, r.Tools.Remove(ctx, agent)
+	}
+	tools, err := r.Tools.Ensure(ctx, agent)
+	if err != nil {
+		return tools, fmt.Errorf("MCP tools: %w", err)
+	}
+	r.setCondition(status, agent, ConditionToolsReady, tools.Ready, tools.Reason, tools.Message)
+	return tools, nil
 }
 
 // ensureRoute exposes a serving Agent on the agent gateway, or removes its
