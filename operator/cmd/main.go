@@ -98,7 +98,11 @@ func main() {
 	serviceFlag(&gateways.AgentGateway, "agent-gateway", "Agent gateway Service for MCP tools and A2A")
 	serviceFlag(&gateways.Collector, "otel-collector", "OTel collector Service (OTLP/HTTP port)")
 	flag.StringVar(&gateways.ClusterDomain, "cluster-domain", gateways.ClusterDomain, "Cluster DNS domain")
+	harnessImages := map[agentoryv1alpha1.HarnessKind]string{}
+	claudeImage := flag.String("harness-image-claude-code", "agentory-harness-claude-code:dev",
+		"Default image for harness kind claude-code (spec.harness.image overrides it)")
 	flag.Parse()
+	harnessImages[agentoryv1alpha1.HarnessKindClaudeCode] = *claudeImage
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
@@ -190,10 +194,10 @@ func main() {
 		// main exits as soon as the manager stops, so releasing is safe; it cuts the
 		// hand-over after a rollout from the lease duration (~15s) to near zero.
 		LeaderElectionReleaseOnCancel: true,
-		// Read Secrets and ConfigMaps straight from the API server: caching them
-		// would mean watching, and holding in memory, every one in the cluster.
+		// Read Secrets, ConfigMaps and Pods straight from the API server: caching
+		// them would mean watching, and holding in memory, every one in the cluster.
 		Client: client.Options{Cache: &client.CacheOptions{
-			DisableFor: []client.Object{&corev1.Secret{}, &corev1.ConfigMap{}},
+			DisableFor: []client.Object{&corev1.Secret{}, &corev1.ConfigMap{}, &corev1.Pod{}},
 		}},
 	})
 	if err != nil {
@@ -201,12 +205,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	backends := agentruntime.NewRegistry(
+		agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways),
+		agentruntime.NewJobBackend(mgr.GetClient(), mgr.GetScheme(), gateways, harnessImages),
+	)
 	if err := (&controller.AgentReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Backends: agentruntime.NewRegistry(
-			agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways),
-		),
+		Client:      mgr.GetClient(),
+		Scheme:      mgr.GetScheme(),
+		Backends:    backends,
 		VirtualKeys: virtualKeyManager(mgr, gateways),
 		Routes:      routeManager(mgr, gateways),
 	}).SetupWithManager(mgr); err != nil {
@@ -214,8 +220,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.TaskReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Backends: backends,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "task")
 		os.Exit(1)

@@ -175,7 +175,7 @@ func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1al
 		status.VirtualKeyRef = nil
 	}
 
-	if r.Routes != nil && a2a.Exposed(agent) {
+	if r.Routes != nil && a2a.Exposed(agent) && agent.Spec.Lifecycle == agentoryv1alpha1.LifecycleService {
 		if err := r.Routes.EnsureCard(ctx, agent, revision); err != nil {
 			return nil, nil, fmt.Errorf("agent card: %w", err)
 		}
