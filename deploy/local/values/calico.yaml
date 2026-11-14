@@ -1,0 +1,15 @@
+# tigera-operator chart values for kind.
+installation:
+  calicoNetwork:
+    ipPools:
+      - cidr: 192.168.0.0/16
+        encapsulation: VXLANCrossSubnet
+        natOutgoing: Enabled
+        nodeSelector: all()
+# Not needed locally; keeps memory use down.
+apiServer:
+  enabled: false
+goldmane:
+  enabled: false
+whisker:
+  enabled: false

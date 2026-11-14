@@ -1,0 +1,41 @@
+# Bifrost (LLM gateway) values for local development.
+# Provider keys and the dev virtual key are NOT here: scripts/up.sh writes them to
+# deploy/local/.secrets/ (git-ignored) and passes that file as a second -f.
+fullnameOverride: bifrost
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    memory: 1Gi
+
+# Provider API keys arrive as env vars from this Secret (created by up.sh).
+envFrom:
+  - secretRef:
+      name: bifrost-provider-keys
+      optional: true
+
+storage:
+  mode: sqlite
+  persistence:
+    enabled: true
+    size: 1Gi
+
+bifrost:
+  logLevel: info
+  encryptionKeySecret:
+    name: bifrost-encryption
+    key: encryption-key
+  client:
+    # Every inference call must carry a virtual key (x-bf-vk) or API key.
+    enforceAuthOnInference: true
+  plugins:
+    otel:
+      enabled: true
+      config:
+        service_name: bifrost
+        collector_url: otel-collector.observability.svc.cluster.local:4317
+        protocol: grpc
+        trace_type: genai_extension
+        insecure: true

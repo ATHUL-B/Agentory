@@ -1,0 +1,9 @@
+# agentgateway controller values for local development.
+# Defaults create the "agentgateway" GatewayClass; manifests/gateway.yaml creates
+# the Gateway that agent routes (backlog items 4 and 6) attach to.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
