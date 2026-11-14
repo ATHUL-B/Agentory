@@ -1,0 +1,20 @@
+# A skill for the payments-oncall sample Agent, as a SKILL.md bundle in a
+# ConfigMap (the skill source the operator supports today). Immutable: to change
+# the skill, create a new ConfigMap (e.g. -v2) and point the Agent at it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skill-k8s-triage-v1
+  labels:
+    app.kubernetes.io/name: agentory-operator
+immutable: true
+data:
+  SKILL.md: |
+    ---
+    name: k8s-triage
+    description: Triage a failing Kubernetes workload during an incident
+    ---
+    1. Check what changed: recent deploys and config changes for the service.
+    2. Read the failing pods' events and the last 50 log lines.
+    3. If the last deploy is the cause, propose a rollback. Never roll back
+       without approval.

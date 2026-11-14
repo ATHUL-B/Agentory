@@ -1,10 +1,11 @@
 # Sample agents, one per runtime. All use the in-cluster mock model so they
 # work without an API key (deploy/local, `make up`).
 #
-# The container and harness agents run today; the declarative agent is
-# validated and reports Ready=False/BackendNotImplemented until item 8.
+# All three run today. Apply skill_k8s_triage.yaml first (or the whole
+# directory): the declarative agent waits for its skill.
 
-# Type 3: declarative agent for non-developers (instructions + skills + MCP tools).
+# Type 3: declarative agent for non-developers: instructions + skills, no code.
+# (MCP tools are listed for the future: routing them is backlog 6b.)
 apiVersion: agentory.dev/v1alpha1
 kind: Agent
 metadata:
@@ -19,6 +20,11 @@ spec:
     instructions: |
       You are the on-call agent for the payments team. Triage the alert, check
       recent deploys and logs, and propose a next step. Never act without approval.
+    skills:
+      - name: k8s-triage
+        source:
+          configMap:
+            name: skill-k8s-triage-v1
   model:
     provider: mock
     name: mock-model
