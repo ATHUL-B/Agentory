@@ -288,6 +288,23 @@ are level-triggered and safe to retry.
 - Verified in kind: one Jaeger trace holds the caller's request, the agent's
   `invoke_agent` span and Bifrost's spans for the model call.
 
+### 4.6 Implemented (item 6b): MCP tools
+
+- New CRD **`MCPServer`** (`url`, `transport`, `description`): the tool registry.
+  A name is looked up in the Agent's namespace, then in the platform namespace
+  (`--mcp-registry-namespace`); `url` on the reference bypasses the registry.
+- `internal/mcp.Manager` owns `<agent>-mcp`: an agentgateway MCP backend
+  (`prefixMode: Always`, static targets, TLS + SNI for https), an HTTPRoute at
+  `/mcp/<ns>/<agent>`, and an `AgentgatewayPolicy` with
+  `backend.mcp.authorization` CEL rules. Verified with agentgateway v1.4.1:
+  `mcp.tool.name` is the unprefixed name, `mcp.tool.target` the server;
+  `tools/list` is filtered and calls outside the list fail with "Unknown tool".
+- The tools reach workloads as `AGENTORY_MCP_URL` + `AGENTORY_MCP_ENABLED`. The
+  declarative runtime has a Streamable-HTTP MCP client (JSON and SSE responses,
+  session id, traceparent); the harness passes `--mcp-config`.
+- Enabled only when the HTTPRoute, AgentgatewayBackend and AgentgatewayPolicy
+  CRDs exist.
+
 ## 5. Runtimes
 
 ### 5.1 Container (`runtime: container`)

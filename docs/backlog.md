@@ -16,7 +16,9 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 5 | Bifrost virtual key per agent (`LLMGatewayClient`): least-privilege key, Secret, rotation on loss, finalizer cleanup | P0 | done | ADR-0002, HLD-0001 §4.2 | - |
 | 6 | A2A route + generated Agent Card on agentgateway | P0 | done | HLD-0001 §7, §4.3 | - |
 | 6a | Enforce `a2a.allowedCallers` at the agent gateway (needs per-agent caller identity: ServiceAccount token or actor JWT, see 23) | P1 | todo | HLD needed | - |
-| 6b | MCP routing per agent: `/mcp/<ns>/<agent>` on agentgateway with the agent's `tools.mcpServers` allow-list; platform MCP server registry | P1 | todo | HLD needed | - |
+| 6b | MCP routing per agent: `/mcp/<ns>/<agent>` on agentgateway with the agent's `tools.mcpServers` allow-list; platform MCP server registry | P1 | done | HLD-0001 §4.6 | - |
+| 6c | Credentials for MCP servers: per-server secret injected by the gateway (`static.policies.auth` / backend auth), never in the agent pod | P1 | todo | - | - |
+| 6d | agentgateway tracing to the collector, so MCP and A2A hops appear in the same trace | P2 | todo | - | - |
 | 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | done | HLD-0001 §5.3, §4.4 | - |
 | 7a | Harness workspaces: clone `harness.workspace.git` per Task, through a controlled egress exception (git host allow-list via an egress proxy), and push a result branch | P1 | todo | HLD needed | - |
 | 7b | Codex harness image (`kind: codex`) | P2 | todo | - | - |

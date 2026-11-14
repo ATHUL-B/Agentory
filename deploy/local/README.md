@@ -25,6 +25,7 @@ make down    # delete the cluster (PURGE=1 also deletes generated keys)
 | `observability` | Jaeger all-in-one | `2.22.0` | Local trace viewer (in-memory) |
 | `bifrost` | Bifrost | chart `2.1.45`, image `v2.3.1` | LLM gateway, virtual keys, cost, OTel spans |
 | `mock-llm` | [Mock LLM](../../tools/mock-llm/README.md) | `python:3.12.12-slim` | Provider `mock`: model `mock/mock-model`, deterministic replies and tool calls |
+| `mcp-demo` | [On-call MCP demo](../../tools/oncall-mcp/README.md) | `python:3.12.12-slim` | MCP tools with incident data: deploys, pod events, error rates |
 
 All pins live in [`versions.env`](versions.env).
 
@@ -118,6 +119,12 @@ curl -s localhost:8080/v1/chat/completions \
     its card lists the skill; an A2A message is answered by the runtime through
     the LLM gateway; **one trace** holds the agent's span and the gateway's spans;
     a git-sourced skill is reported `SkillSourceNotSupported`.
+13. Only after `make operator-up`: an agent using a registry `MCPServer` is
+    Ready with its tool route; from its pod the gateway lists **only** its
+    allowed tools, an allowed call returns data and a disallowed one is
+    rejected; an A2A request is answered **using the tool**; an unregistered
+    server is reported `MCPServerNotFound`; a Claude Code Task uses the same
+    tools through the gateway.
 
 ## UIs
 

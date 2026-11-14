@@ -17,7 +17,8 @@ Built with kubebuilder v4.16 / controller-runtime.
 | **A2A exposure**: generated Agent Card + agentgateway A2A backend + HTTPRoute at `/agents/<ns>/<agent>` | ✅ (item 6) |
 | **JobBackend + Tasks**: `harness` agents run each Task as a Job (Claude Code); result, usage, cost, changed files and traceId in `Task.status` | ✅ (item 7) |
 | **Declarative agents**: instructions + skills (ConfigMap `SKILL.md`), run by the declarative runtime; one trace from caller to model | ✅ (item 8) |
-| Caller allow-lists (6a), MCP routing (6b), workspace clone (7a), git/OCI skills (8a) | Backlog |
+| **MCP tools**: `MCPServer` registry, per-Agent tool route on the agent gateway, allow-list enforced by the gateway; used by declarative agents and the Claude Code harness | ✅ (item 6b) |
+| Caller allow-lists (6a), MCP credentials (6c), workspace clone (7a), git/OCI skills (8a) | Backlog |
 
 ## API at a glance
 
@@ -155,6 +156,44 @@ needs per-agent caller identity at the gateway), and MCP routes under
 
 Exposure is turned off automatically, and logged, when the Gateway API or
 agentgateway CRDs are not installed.
+
+## MCP tools
+
+```yaml
+kind: MCPServer               # the tool registry: publish a server once
+metadata: { name: oncall, namespace: agentory-mcp }
+spec: { url: "http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp" }
+---
+kind: Agent
+spec:
+  tools:
+    mcpServers:
+      - name: oncall                              # found in the Agent's namespace, then agentory-mcp
+        tools: [get_recent_deploys, get_error_rate]   # allow-list; omit for all tools
+      - name: team-runbooks
+        url: https://runbooks.payments.internal/mcp   # or point at a URL directly
+```
+
+For an Agent with `tools.mcpServers`, the operator owns three objects named
+`<agent>-mcp`:
+- an **agentgateway MCP backend** with one target per server (HTTPS targets
+  get TLS with SNI; `prefixMode: Always`, so tools are named `<server>_<tool>`);
+- an **HTTPRoute** at `/mcp/<namespace>/<agent>`, which is the agent's
+  `AGENTORY_MCP_URL`;
+- an **AgentgatewayPolicy** whose CEL rules (`mcp.tool.target`, `mcp.tool.name`)
+  allow exactly the listed tools.
+
+The gateway filters `tools/list` and rejects calls to anything else, so the
+allow-list holds even for a container agent that ignores it. `ToolsReady` comes
+from the route's status, and `Ready` needs it. An unknown server gives
+`MCPServerNotFound` and a bad URL `InvalidMCPURL`. Removing the tools removes
+the route.
+
+Workloads get `AGENTORY_MCP_ENABLED=true`. The declarative runtime then loads
+the tools from the gateway, and the Claude Code harness passes
+`--mcp-config` (tools appear as `mcp__agentory__<server>_<tool>`).
+
+Not yet: credentials for MCP servers (6c), and gateway spans for MCP calls (6d).
 
 ## Declarative agents
 
