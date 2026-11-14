@@ -10,7 +10,7 @@ make up      # create or update the cluster (idempotent)
 make smoke   # end-to-end checks against the running cluster
 make check   # static checks + unit tests, no Docker needed
 make test    # unit tests only (mock LLM + operator)
-make operator-up  # build the operator, load it into kind, deploy CRDs + controller
+make operator-up  # build the operator and the echo agent, load them into kind, deploy
 make down    # delete the cluster (PURGE=1 also deletes generated keys)
 ```
 
@@ -103,6 +103,11 @@ curl -s localhost:8080/v1/chat/completions \
    `<agent>-llm`); its pod calls `mock/mock-model` with the injected key (200)
    and is refused any other model (403); a key deleted in Bifrost is
    re-created and the pod restarts with it; deleting the Agent deletes its key.
+10. Only after `make operator-up`: two echo agents (`tools/echo-agent`) become
+    Ready with accepted routes; from inside one agent's locked-down pod, the
+    other's generated Agent Card is fetched through the gateway, an A2A
+    `message/send` goes gateway → agent → LLM gateway → model and back, and a
+    direct pod-to-pod call is blocked; deleting the Agents removes their routes.
 
 ## UIs
 
