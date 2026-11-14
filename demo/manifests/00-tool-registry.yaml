@@ -1,0 +1,11 @@
+# The platform team publishes an MCP server once, in the shared registry
+# namespace. Any team's agent can then use it by name, limited to the tools it
+# lists. (This one is the demo server from `make up`, with incident data.)
+apiVersion: agentory.dev/v1alpha1
+kind: MCPServer
+metadata:
+  name: oncall
+  namespace: agentory-mcp
+spec:
+  url: http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp
+  description: Recent deploys, pod events and error rates per service
