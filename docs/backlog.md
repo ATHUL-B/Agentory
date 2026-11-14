@@ -13,7 +13,7 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 2b | Local Langfuse profile (cert-manager + ClickHouse operator), collector exporter switch | P1 | todo | ADR-0002 amendment | - |
 | 3 | Operator scaffold (kubebuilder), `Agent` + `Task` CRDs with CEL validation; controllers record revision/acceptance and resolve Task→Agent; `make operator-up` deploys to kind | P0 | done | HLD-0001 §3 | - |
 | 4 | `DeploymentBackend` + `runtime: container` + egress NetworkPolicy + gateway env injection | P0 | done | HLD-0001 §5.1, §6 | - |
-| 5 | Bifrost virtual key per agent (`LLMGatewayClient`) | P0 | todo | ADR-0002 | - |
+| 5 | Bifrost virtual key per agent (`LLMGatewayClient`): least-privilege key, Secret, rotation on loss, finalizer cleanup | P0 | done | ADR-0002, HLD-0001 §4.2 | - |
 | 6 | A2A route + generated Agent Card on agentgateway | P0 | todo | HLD-0001 §7 | - |
 | 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | todo | HLD-0001 §5.3 | - |
 | 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | todo | HLD-0001 §5.2 | - |
