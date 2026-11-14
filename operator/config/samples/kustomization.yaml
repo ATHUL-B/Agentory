@@ -1,6 +1,7 @@
 ## Append samples of your project ##
 resources:
 - skill_k8s_triage.yaml
+- agentory_v1alpha1_mcpserver.yaml
 - agentory_v1alpha1_agent.yaml
 - agentory_v1alpha1_task.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples

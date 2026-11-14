@@ -1,0 +1,78 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.22.0
+  name: mcpservers.agentory.dev
+spec:
+  group: agentory.dev
+  names:
+    kind: MCPServer
+    listKind: MCPServerList
+    plural: mcpservers
+    shortNames:
+    - mcp
+    singular: mcpserver
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.url
+      name: URL
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: MCPServer is a named MCP server in the platform's tool registry.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              MCPServerSpec registers an MCP server that Agents can use by name.
+              Agents look a name up in their own namespace first, then in the platform's
+              shared registry namespace (operator flag --mcp-registry-namespace).
+            properties:
+              description:
+                description: Description tells people (and the UI) what the server's
+                  tools are for.
+                maxLength: 1024
+                type: string
+              transport:
+                default: StreamableHTTP
+                description: Transport defaults to StreamableHTTP.
+                enum:
+                - StreamableHTTP
+                - SSE
+                type: string
+              url:
+                description: URL of the server's MCP endpoint, e.g. http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp.
+                pattern: ^https?://[^/:]+(:[0-9]+)?(/.*)?$
+                type: string
+            required:
+            - url
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources: {}
