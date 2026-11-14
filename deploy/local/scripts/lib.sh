@@ -13,6 +13,10 @@ source "${LOCAL_DIR}/versions.env"
 
 KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}"
 
+# Bifrost admin user; its password is generated into ${SECRETS_DIR}.
+# shellcheck disable=SC2034  # used by the scripts that source this file
+BIFROST_ADMIN_USER="admin"
+
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m  !\033[0m %s\n' "$*" >&2; }

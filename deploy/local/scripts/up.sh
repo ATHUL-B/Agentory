@@ -82,7 +82,12 @@ k create namespace bifrost --dry-run=client -o yaml | k apply -f - >/dev/null
 # Encryption key and dev virtual key are generated once and reused on re-runs.
 [[ -s "${SECRETS_DIR}/bifrost-encryption-key" ]] || random_hex 32 > "${SECRETS_DIR}/bifrost-encryption-key"
 [[ -s "${SECRETS_DIR}/dev-virtual-key" ]] || echo "sk-bf-$(random_hex 24)" > "${SECRETS_DIR}/dev-virtual-key"
+[[ -s "${SECRETS_DIR}/bifrost-admin-password" ]] || random_hex 24 > "${SECRETS_DIR}/bifrost-admin-password"
 chmod 600 "${SECRETS_DIR}"/*
+
+k -n bifrost create secret generic bifrost-admin --from-literal=username="${BIFROST_ADMIN_USER}" \
+  --from-file=password="${SECRETS_DIR}/bifrost-admin-password" \
+  --dry-run=client -o yaml | k apply -f - >/dev/null
 
 k -n bifrost create secret generic bifrost-encryption \
   --from-file=encryption-key="${SECRETS_DIR}/bifrost-encryption-key" \
@@ -118,6 +123,7 @@ Local cluster is up (context: ${KUBE_CONTEXT}).
   Jaeger UI:      kubectl --context ${KUBE_CONTEXT} -n observability port-forward svc/jaeger 16686  → http://localhost:16686
   Bifrost UI:     kubectl --context ${KUBE_CONTEXT} -n bifrost port-forward svc/bifrost 8080       → http://localhost:8080
   Dev virtual key: ${SECRETS_DIR}/dev-virtual-key
+  Bifrost admin:  ${BIFROST_ADMIN_USER} / ${SECRETS_DIR}/bifrost-admin-password
   Mock model:     mock/mock-model (deterministic, no API key)
   Tear down:      make down
 EOF
