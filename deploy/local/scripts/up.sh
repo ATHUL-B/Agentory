@@ -76,6 +76,15 @@ k -n mock-llm rollout restart deploy/mock-llm >/dev/null
 k -n mock-llm rollout status deploy/mock-llm --timeout=3m >/dev/null
 ok "running"
 
+log "Demo on-call MCP server (tools for agents, no accounts needed)"
+k create namespace mcp-demo --dry-run=client -o yaml | k apply -f - >/dev/null
+k -n mcp-demo create configmap oncall-mcp-code --from-file="${REPO_DIR}/tools/oncall-mcp/server.py" \
+  --dry-run=client -o yaml | k apply -f - >/dev/null
+render "${LOCAL_DIR}/manifests/oncall-mcp.yaml" | k apply -f - >/dev/null
+k -n mcp-demo rollout restart deploy/oncall-mcp >/dev/null
+k -n mcp-demo rollout status deploy/oncall-mcp --timeout=3m >/dev/null
+ok "running at http://oncall-mcp.mcp-demo.svc.cluster.local:8080/mcp"
+
 log "Bifrost ${BIFROST_CHART_VERSION} (LLM gateway)"
 k create namespace bifrost --dry-run=client -o yaml | k apply -f - >/dev/null
 

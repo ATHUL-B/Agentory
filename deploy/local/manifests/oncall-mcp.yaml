@@ -1,0 +1,53 @@
+# Demo on-call MCP server (tools/oncall-mcp): deterministic deploy, event and
+# error-rate data, so agents can use real tools without any accounts. Its
+# code is mounted from the oncall-mcp-code ConfigMap created by scripts/up.sh.
+# Image tag is substituted from versions.env (MOCK_LLM_IMAGE, a stock python).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oncall-mcp
+  namespace: mcp-demo
+  labels: { app.kubernetes.io/name: oncall-mcp }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: oncall-mcp }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: oncall-mcp }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: oncall-mcp
+          image: ${MOCK_LLM_IMAGE}
+          command: ["python", "-u", "/app/server.py"]
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            - { name: code, mountPath: /app, readOnly: true }
+      volumes:
+        - name: code
+          configMap:
+            name: oncall-mcp-code
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: oncall-mcp
+  namespace: mcp-demo
+spec:
+  selector: { app.kubernetes.io/name: oncall-mcp }
+  ports:
+    - { name: http, port: 8080, targetPort: http }
