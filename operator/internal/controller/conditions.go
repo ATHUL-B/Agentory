@@ -21,6 +21,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 )
@@ -31,6 +35,9 @@ const (
 	ConditionReady         = "Ready"
 	ConditionAgentResolved = "AgentResolved"
 	ConditionStarted       = "Started"
+
+	ConditionWorkloadReady       = "WorkloadReady"
+	ConditionEgressPolicyApplied = "EgressPolicyApplied"
 )
 
 // Condition reasons.
@@ -39,6 +46,7 @@ const (
 	ReasonBackendNotImplemented = "BackendNotImplemented"
 	ReasonAgentFound            = "AgentFound"
 	ReasonAgentNotFound         = "AgentNotFound"
+	ReasonPolicyApplied         = "PolicyApplied"
 )
 
 // revisionHashLength keeps revisions short enough to read in kubectl output.
@@ -54,4 +62,22 @@ func SpecRevision(name string, spec *agentoryv1alpha1.AgentSpec) (string, error)
 	}
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("%s-%s", name, hex.EncodeToString(sum[:])[:revisionHashLength]), nil
+}
+
+// conflictRequeueDelay is how soon to retry after a write conflict.
+const conflictRequeueDelay = 200 * time.Millisecond
+
+// statusUpdateResult turns a failed status write into a reconcile result.
+// A conflict means the object changed since it was read (common when owned
+// objects change together): requeue quietly instead of logging an error.
+// A deleted object needs no further work.
+func statusUpdateResult(err error) (ctrl.Result, error) {
+	switch {
+	case apierrors.IsConflict(err):
+		return ctrl.Result{RequeueAfter: conflictRequeueDelay}, nil
+	case apierrors.IsNotFound(err):
+		return ctrl.Result{}, nil
+	default:
+		return ctrl.Result{}, err
+	}
 }

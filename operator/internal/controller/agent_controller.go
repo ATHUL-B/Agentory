@@ -20,6 +20,9 @@ import (
 	"context"
 	"fmt"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,22 +32,26 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
+	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 )
 
-// AgentReconciler reconciles an Agent object.
-//
-// Scope today (backlog item 3): record the spec revision and acceptance in the
-// status. Runtime backends that create workloads, gateway routes and virtual
-// keys are added in backlog items 4–8, behind the RuntimeBackend interface
-// (HLD-0001 §4).
+// AgentReconciler reconciles an Agent object: it records the spec revision and
+// acceptance, then hands the Agent to the runtime backend that supports it
+// (HLD-0001 §4). Agents no backend supports yet stay Ready=False with reason
+// BackendNotImplemented.
 type AgentReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// Backends selects the runtime backend per Agent. Nil means none.
+	Backends *agentruntime.Registry
 }
 
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agentory.dev,resources=agents/finalizers,verbs=update
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=services;serviceaccounts,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile brings an Agent's status in line with its spec.
 func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -55,7 +62,7 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	desired, err := r.desiredStatus(&agent)
+	desired, err := r.desiredStatus(ctx, &agent)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
@@ -65,14 +72,13 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	agent.Status = *desired
 	if err := r.Status().Update(ctx, &agent); err != nil {
-		// Conflicts are expected when the object changed meanwhile; the next event retries.
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return statusUpdateResult(err)
 	}
 	log.Info("agent status updated", "revision", desired.Revision, "phase", desired.Phase)
 	return ctrl.Result{}, nil
 }
 
-func (r *AgentReconciler) desiredStatus(agent *agentoryv1alpha1.Agent) (*agentoryv1alpha1.AgentStatus, error) {
+func (r *AgentReconciler) desiredStatus(ctx context.Context, agent *agentoryv1alpha1.Agent) (*agentoryv1alpha1.AgentStatus, error) {
 	revision, err := SpecRevision(agent.Name, &agent.Spec)
 	if err != nil {
 		return nil, err
@@ -82,29 +88,69 @@ func (r *AgentReconciler) desiredStatus(agent *agentoryv1alpha1.Agent) (*agentor
 	status.ObservedGeneration = agent.Generation
 	status.Revision = revision
 	status.Phase = agentoryv1alpha1.AgentPhasePending
+	r.setCondition(status, agent, ConditionAccepted, true, ReasonSpecValid, "spec passed validation")
 
-	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type:               ConditionAccepted,
-		Status:             metav1.ConditionTrue,
-		Reason:             ReasonSpecValid,
-		Message:            "spec passed validation",
-		ObservedGeneration: agent.Generation,
-	})
-	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
-		Type:   ConditionReady,
-		Status: metav1.ConditionFalse,
-		Reason: ReasonBackendNotImplemented,
-		Message: fmt.Sprintf("no runtime backend yet for runtime=%s lifecycle=%s (backlog items 4-8)",
-			agent.Spec.Runtime, agent.Spec.Lifecycle),
-		ObservedGeneration: agent.Generation,
-	})
+	backend, ok := r.Backends.For(agent)
+	if !ok {
+		status.Endpoints = nil
+		r.setCondition(status, agent, ConditionReady, false, ReasonBackendNotImplemented,
+			fmt.Sprintf("no runtime backend yet for runtime=%s lifecycle=%s (backlog items 4-8)",
+				agent.Spec.Runtime, agent.Spec.Lifecycle))
+		return status, nil
+	}
+
+	rt, err := backend.EnsureAgent(ctx, agent, revision)
+	if err != nil {
+		return nil, fmt.Errorf("%s backend: %w", backend.Name(), err)
+	}
+	if rt.InternalEndpoint != "" {
+		status.Endpoints = &agentoryv1alpha1.AgentEndpoints{Internal: rt.InternalEndpoint}
+	}
+	r.setCondition(status, agent, ConditionEgressPolicyApplied, rt.Reason != agentruntime.ReasonResourceConflict,
+		egressReason(rt), egressMessage(rt))
+	r.setCondition(status, agent, ConditionWorkloadReady, rt.WorkloadReady, rt.Reason, rt.Message)
+	r.setCondition(status, agent, ConditionReady, rt.WorkloadReady, rt.Reason, rt.Message)
+	if rt.WorkloadReady {
+		status.Phase = agentoryv1alpha1.AgentPhaseReady
+	} else if rt.Reason == agentruntime.ReasonResourceConflict {
+		status.Phase = agentoryv1alpha1.AgentPhaseFailed
+	}
 	return status, nil
+}
+
+func (r *AgentReconciler) setCondition(status *agentoryv1alpha1.AgentStatus, agent *agentoryv1alpha1.Agent,
+	conditionType string, ok bool, reason, message string) {
+	s := metav1.ConditionFalse
+	if ok {
+		s = metav1.ConditionTrue
+	}
+	meta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type: conditionType, Status: s, Reason: reason, Message: message, ObservedGeneration: agent.Generation,
+	})
+}
+
+func egressReason(rt agentruntime.AgentRuntimeStatus) string {
+	if rt.Reason == agentruntime.ReasonResourceConflict {
+		return rt.Reason
+	}
+	return ReasonPolicyApplied
+}
+
+func egressMessage(rt agentruntime.AgentRuntimeStatus) string {
+	if rt.Reason == agentruntime.ReasonResourceConflict {
+		return rt.Message
+	}
+	return "egress limited to DNS, LLM gateway, agent gateway and collector; ingress only from the agent gateway"
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&agentoryv1alpha1.Agent{}).
+		Owns(&appsv1.Deployment{}).
+		Owns(&corev1.Service{}).
+		Owns(&corev1.ServiceAccount{}).
+		Owns(&networkingv1.NetworkPolicy{}).
 		Named("agent").
 		Complete(r)
 }

@@ -37,6 +37,7 @@ import (
 
 	agentoryv1alpha1 "github.com/ATHUL-B/Agentory/operator/api/v1alpha1"
 	"github.com/ATHUL-B/Agentory/operator/internal/controller"
+	agentruntime "github.com/ATHUL-B/Agentory/operator/internal/runtime"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -86,6 +87,11 @@ func main() {
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
+	gateways := agentruntime.DefaultGatewayConfig()
+	serviceFlag(&gateways.LLMGateway, "llm-gateway", "LLM gateway (Bifrost) Service agents call for models")
+	serviceFlag(&gateways.AgentGateway, "agent-gateway", "Agent gateway Service for MCP tools and A2A")
+	serviceFlag(&gateways.Collector, "otel-collector", "OTel collector Service (OTLP/HTTP port)")
+	flag.StringVar(&gateways.ClusterDomain, "cluster-domain", gateways.ClusterDomain, "Cluster DNS domain")
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -175,7 +181,9 @@ func main() {
 		// the manager stops, so would be fine to enable this option. However,
 		// if you are doing or is intended to do any operation such as perform cleanups
 		// after the manager stops then its usage might be unsafe.
-		// LeaderElectionReleaseOnCancel: true,
+		// main exits as soon as the manager stops, so releasing is safe; it cuts the
+		// hand-over after a rollout from the lease duration (~15s) to near zero.
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
@@ -185,6 +193,9 @@ func main() {
 	if err := (&controller.AgentReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		Backends: agentruntime.NewRegistry(
+			agentruntime.NewDeploymentBackend(mgr.GetClient(), mgr.GetScheme(), gateways),
+		),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "agent")
 		os.Exit(1)
@@ -212,4 +223,16 @@ func main() {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
+}
+
+// serviceFlag registers a "namespace/name:port" flag that overrides ref.
+func serviceFlag(ref *agentruntime.ServiceRef, name, usage string) {
+	flag.Func(name, usage+" as namespace/name:port (default "+ref.String()+")", func(v string) error {
+		parsed, err := agentruntime.ParseServiceRef(v)
+		if err != nil {
+			return err
+		}
+		*ref = parsed
+		return nil
+	})
 }
