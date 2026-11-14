@@ -23,9 +23,22 @@ add_helm_repos
 ok "updated"
 
 log "Calico ${CALICO_CHART_VERSION} (NetworkPolicy enforcement)"
-h upgrade --install calico projectcalico/tigera-operator \
-  --version "${CALICO_CHART_VERSION}" --namespace tigera-operator --create-namespace \
-  -f "${LOCAL_DIR}/values/calico.yaml" --wait --timeout 10m >/dev/null
+# Since Calico v3.32 the CRDs ship in their own chart and must be installed first.
+# The rendered CRDs exceed Helm's 1 MiB release-Secret limit, so apply them
+# directly (server-side, as the CRDs are also too large for client-side apply).
+helm template calico-crds projectcalico/crd.projectcalico.org.v1 --version "${CALICO_CHART_VERSION}" \
+  | k apply --server-side --force-conflicts -f - >/dev/null
+k wait --for=condition=Established crd/installations.operator.tigera.io --timeout=2m >/dev/null
+# The operator takes ownership of fields in the Installation it reconciles, so a
+# Helm (server-side) upgrade at the same version conflicts with it. Only install
+# or change Calico when the pinned version differs from what is deployed.
+if [[ "$(release_chart tigera-operator calico)" == "tigera-operator-${CALICO_CHART_VERSION}" ]]; then
+  ok "already at ${CALICO_CHART_VERSION}"
+else
+  h upgrade --install calico projectcalico/tigera-operator \
+    --version "${CALICO_CHART_VERSION}" --namespace tigera-operator --create-namespace \
+    -f "${LOCAL_DIR}/values/calico.yaml" --wait --timeout 10m >/dev/null
+fi
 k wait --for=condition=Ready nodes --all --timeout=10m >/dev/null
 ok "nodes Ready"
 
@@ -72,6 +85,8 @@ if ((${#provider_args[@]})); then
   k -n bifrost create secret generic bifrost-provider-keys "${provider_args[@]}" \
     --dry-run=client -o yaml | k apply -f - >/dev/null
 else
+  # Remove keys from a previous run so the cluster matches this invocation.
+  k -n bifrost delete secret bifrost-provider-keys --ignore-not-found >/dev/null
   warn "No ANTHROPIC_API_KEY or OPENAI_API_KEY set: Bifrost starts without providers (model calls will fail)."
 fi
 
@@ -81,8 +96,8 @@ h upgrade --install bifrost bifrost/bifrost \
   -f "${LOCAL_DIR}/values/bifrost.yaml" -f "${SECRETS_DIR}/bifrost-generated.yaml" \
   --wait --timeout 10m >/dev/null
 # Pick up changed provider keys on re-runs (the Secret is read only at start-up).
-k -n bifrost rollout restart deploy/bifrost >/dev/null
-k -n bifrost rollout status deploy/bifrost --timeout=5m >/dev/null
+k -n bifrost rollout restart statefulset/bifrost >/dev/null
+k -n bifrost rollout status statefulset/bifrost --timeout=5m >/dev/null
 ok "running"
 
 cat <<EOF

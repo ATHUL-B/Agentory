@@ -31,6 +31,17 @@ require_docker_running() {
 k() { kubectl --context "${KUBE_CONTEXT}" "$@"; }
 h() { helm --kube-context "${KUBE_CONTEXT}" "$@"; }
 
+# Prints "<chart>-<version>" of the most recent successfully deployed revision of a
+# Helm release, or nothing. Uses history so a later failed upgrade attempt does
+# not hide a working install.
+release_chart() {
+  local ns="$1" name="$2"
+  h -n "$ns" history "$name" -o json 2>/dev/null \
+    | python3 -c 'import json,sys
+d=[r for r in json.load(sys.stdin) if r.get("status") in ("deployed","superseded")]
+print(d[-1]["chart"] if d else "")' 2>/dev/null || true
+}
+
 cluster_exists() {
   kind get clusters 2>/dev/null | grep -qx "${KIND_CLUSTER_NAME}"
 }
@@ -67,6 +78,7 @@ bifrost_generated_values() {
       echo "        - name: anthropic-dev"
       echo "          value: env.ANTHROPIC_API_KEY"
       echo "          weight: 1"
+      echo "          models: [\"*\"]"
     fi
     if [[ -n "${OPENAI_API_KEY:-}" ]]; then
       echo "    openai:"
@@ -74,6 +86,7 @@ bifrost_generated_values() {
       echo "        - name: openai-dev"
       echo "          value: env.OPENAI_API_KEY"
       echo "          weight: 1"
+      echo "          models: [\"*\"]"
     fi
   fi
   echo "  governance:"
@@ -83,5 +96,19 @@ bifrost_generated_values() {
   echo "        description: Local development key used by smoke tests"
   echo "        value: ${vk}"
   echo "        is_active: true"
-  echo "        allow_all_providers: true"
+  # allow_all_providers alone permits no models; each provider needs an explicit
+  # entry with allowed models and provider keys (verified against Bifrost v2.3.1).
+  local configured=()
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] && configured+=(anthropic)
+  [[ -n "${OPENAI_API_KEY:-}" ]] && configured+=(openai)
+  if ((${#configured[@]})); then
+    echo "        provider_configs:"
+    local p
+    for p in "${configured[@]}"; do
+      echo "          - provider: ${p}"
+      echo "            weight: 1.0"
+      echo "            allowed_models: [\"*\"]"
+      echo "            key_ids: [\"*\"]"
+    done
+  fi
 }
