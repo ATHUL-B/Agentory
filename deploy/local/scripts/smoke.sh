@@ -216,6 +216,58 @@ else
   warn "skipped: operator not deployed"
 fi
 
+log "Container agent via DeploymentBackend (optional: make operator-up)"
+if k get crd agents.agentory.dev >/dev/null 2>&1; then
+  # A namespace with no other policies, so blocked traffic proves the Agent's own policy.
+  e2e=agentory-e2e
+  k create namespace "$e2e" --dry-run=client -o yaml | k apply -f - >/dev/null
+  k -n "$e2e" apply -f - >/dev/null <<EOF
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata: { name: smoke-crew }
+spec:
+  runtime: container
+  lifecycle: service
+  container: { image: ${SMOKE_AGENT_IMAGE}, port: 8080 }
+  model: { provider: mock, name: mock-model }
+EOF
+  if k -n "$e2e" wait --for=condition=Ready agent/smoke-crew --timeout=180s >/dev/null 2>&1; then
+    pass "container Agent Ready (Deployment, Service, ServiceAccount, NetworkPolicy)"
+    k -n "$e2e" rollout status deploy/smoke-crew --timeout=60s >/dev/null 2>&1 || true
+    pod="$(k -n "$e2e" get pod -l agentory.dev/agent=smoke-crew -o jsonpath='{.items[0].metadata.name}')"
+    agent_curl() {
+      k -n "$e2e" exec "$pod" -- curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || true
+    }
+    if [[ "$(k -n "$e2e" exec "$pod" -- printenv AGENTORY_LLM_BASE_URL 2>/dev/null)" == "http://bifrost.bifrost.svc.cluster.local:8080/v1" ]]; then
+      pass "gateway environment injected"
+    else
+      fail "AGENTORY_LLM_BASE_URL missing or wrong in the agent pod"
+    fi
+    assert_code "$(agent_curl http://bifrost.bifrost.svc.cluster.local:8080/health)" "200" "agent egress allowed: LLM gateway"
+    assert_code "$(agent_curl https://api.anthropic.com)" "000" "agent egress blocked: api.anthropic.com"
+    assert_code "$(agent_curl http://mock-llm.mock-llm.svc.cluster.local:8080/healthz)" "000" \
+      "agent egress blocked: services not on the allow-list"
+
+    # Ingress: only the agent gateway's namespace may reach the agent.
+    in_code() {  # namespace -> HTTP status of a request to the agent from a pod there
+      local from="$1" probe="smoke-ingress-probe"
+      k -n "$from" delete pod "$probe" --ignore-not-found >/dev/null 2>&1
+      k -n "$from" run "$probe" --image="${CURL_IMAGE}" --restart=Never --command -- \
+        curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://smoke-crew.${e2e}.svc.cluster.local:8080" >/dev/null
+      k -n "$from" wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$probe" --timeout=60s >/dev/null 2>&1 || true
+      k -n "$from" logs "$probe" 2>/dev/null || echo "000"
+      k -n "$from" delete pod "$probe" --ignore-not-found --wait=false >/dev/null 2>&1
+    }
+    assert_code "$(in_code agentgateway-system)" "200" "agent ingress allowed: from the agent gateway namespace"
+    assert_code "$(in_code mock-llm)" "000" "agent ingress blocked: from other namespaces"
+  else
+    fail "container Agent not Ready within 180s: $(k -n "$e2e" get agent smoke-crew -o jsonpath='{.status.conditions[?(@.type=="Ready")].message}')"
+  fi
+  k -n "$e2e" delete agent smoke-crew --ignore-not-found --wait=false >/dev/null
+else
+  warn "skipped: operator not deployed"
+fi
+
 echo
 if ((failures)); then die "${failures} check(s) failed"; fi
 ok "all smoke checks passed"
