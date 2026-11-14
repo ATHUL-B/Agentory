@@ -49,6 +49,9 @@ const FinalizerVirtualKey = "agentory.dev/virtual-key"
 // example after its database was reset) is re-created without waiting for an event.
 const virtualKeyResync = 10 * time.Minute
 
+// missingSkillRetry is how often an Agent re-checks for a skill ConfigMap that doesn't exist yet.
+const missingSkillRetry = 15 * time.Second
+
 // AgentReconciler reconciles an Agent object: it records the spec revision and
 // acceptance, ensures the Agent's LLM gateway virtual key, then hands the Agent
 // to the runtime backend that supports it (HLD-0001 §4). Agents no backend
@@ -102,6 +105,11 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 	result := ctrl.Result{}
 	if r.VirtualKeys != nil {
 		result.RequeueAfter = virtualKeyResync
+	}
+	// ConfigMaps aren't watched (that would cache every one in the cluster), so
+	// poll while a skill is missing; it usually shows up moments later.
+	if c := meta.FindStatusCondition(desired.Conditions, ConditionReady); c != nil && c.Reason == agentruntime.ReasonSkillNotFound {
+		result.RequeueAfter = missingSkillRetry
 	}
 
 	if !equality.Semantic.DeepEqual(desired, &agent.Status) {
