@@ -13,8 +13,9 @@ from what the operator mounts and injects; the agent's author writes no code.
 It serves A2A JSON-RPC `message/send`: the system prompt is the instructions
 plus the skills, conversations are kept per contextId, and every request is a
 trace that continues the caller's `traceparent` and is passed on to the gateway.
-Tools (MCP through the agent gateway) plug in through ToolProvider; none are
-wired yet. Standard library only.
+When the Agent lists MCP servers (config "mcp": true), its tools come from
+AGENTORY_MCP_URL, the agent's MCP endpoint on the agent gateway, which only
+exposes the tools the Agent is allowed. Standard library only.
 """
 
 import json
@@ -65,6 +66,7 @@ class RuntimeConfig:
     skills: List[Skill] = field(default_factory=list)
     max_history_messages: int = 40
     max_contexts: int = 1000
+    mcp: bool = False
 
     @classmethod
     def load(cls, path: str, loader: "SkillLoader") -> "RuntimeConfig":
@@ -79,6 +81,7 @@ class RuntimeConfig:
             skills=skills,
             max_history_messages=int(doc.get("maxHistoryMessages") or 40),
             max_contexts=int(doc.get("maxContexts") or 1000),
+            mcp=bool(doc.get("mcp")),
         )
 
 
@@ -267,14 +270,144 @@ class ChatClient:
 
 
 class ToolProvider:
-    """Tools the agent may call. MCP tools through the agent gateway plug in
-    here (backlog 6b); until then the agent has none."""
+    """Tools the agent may call. The default has none."""
 
     def definitions(self) -> List[Dict[str, Any]]:
         return []
 
-    def call(self, name: str, arguments: str) -> str:
+    def call(self, name: str, arguments: str, traceparent: str = "") -> str:
         raise RpcError(INTERNAL_ERROR, f"tool {name!r} is not available")
+
+
+class MCPClient:
+    """Minimal MCP client over Streamable HTTP (protocol 2025-06-18): one session,
+    JSON or server-sent-event responses."""
+
+    protocol_version = "2025-06-18"
+
+    def __init__(self, url: str, timeout: float = 30.0,
+                 post: Optional[Callable[[str, bytes, Dict[str, str], float], Tuple[int, Dict[str, str], str]]] = None) -> None:
+        self.url = url
+        self.timeout = timeout
+        self._post = post or self._http_post
+        self._session: Optional[str] = None
+        self._initialized = False
+        self._ids = 0
+        self._lock = threading.Lock()
+
+    def _request(self, method: str, params: Optional[Dict[str, Any]], traceparent: str, notify: bool = False) -> Any:
+        body: Dict[str, Any] = {"jsonrpc": "2.0", "method": method}
+        if params is not None:
+            body["params"] = params
+        if not notify:
+            self._ids += 1
+            body["id"] = self._ids
+        headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+                   "MCP-Protocol-Version": self.protocol_version}
+        if self._session:
+            headers["Mcp-Session-Id"] = self._session
+        if traceparent:
+            headers["traceparent"] = traceparent
+        status, resp_headers, text = self._post(self.url, json.dumps(body).encode(), headers, self.timeout)
+        session = {k.lower(): v for k, v in resp_headers.items()}.get("mcp-session-id")
+        if session:
+            self._session = session
+        if notify:
+            return None
+        if status >= 400:
+            raise RpcError(INTERNAL_ERROR, f"MCP {method} returned HTTP {status}: {text[:200]}")
+        message = self._parse(text, resp_headers, body["id"])
+        if "error" in message:
+            raise RpcError(INTERNAL_ERROR, f"MCP {method}: {message['error'].get('message', 'error')}")
+        return message.get("result") or {}
+
+    @staticmethod
+    def _parse(text: str, headers: Dict[str, str], request_id: int) -> Dict[str, Any]:
+        ctype = {k.lower(): v for k, v in headers.items()}.get("content-type", "")
+        if "text/event-stream" in ctype:
+            for line in text.splitlines():
+                if line.startswith("data:"):
+                    try:
+                        msg = json.loads(line[5:].strip())
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(msg, dict) and msg.get("id") == request_id:
+                        return msg
+            raise RpcError(INTERNAL_ERROR, "MCP response stream had no reply")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as err:
+            raise RpcError(INTERNAL_ERROR, "MCP response is not JSON") from err
+
+    def _ensure_session(self, traceparent: str) -> None:
+        if self._initialized:
+            return
+        self._request("initialize", {"protocolVersion": self.protocol_version, "capabilities": {},
+                                     "clientInfo": {"name": "agentory-declarative-runtime", "version": "1"}}, traceparent)
+        self._request("notifications/initialized", None, traceparent, notify=True)
+        self._initialized = True
+
+    def list_tools(self, traceparent: str = "") -> List[Dict[str, Any]]:
+        with self._lock:
+            self._ensure_session(traceparent)
+            return list(self._request("tools/list", {}, traceparent).get("tools") or [])
+
+    def call_tool(self, name: str, arguments: Dict[str, Any], traceparent: str = "") -> Dict[str, Any]:
+        with self._lock:
+            self._ensure_session(traceparent)
+            return self._request("tools/call", {"name": name, "arguments": arguments}, traceparent)
+
+    def reset(self) -> None:
+        """Forgets the session, e.g. after the gateway restarted."""
+        with self._lock:
+            self._session, self._initialized = None, False
+
+    @staticmethod
+    def _http_post(url: str, data: bytes, headers: Dict[str, str], timeout: float) -> Tuple[int, Dict[str, str], str]:
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, dict(resp.headers), resp.read().decode()
+        except urllib.error.HTTPError as err:
+            return err.code, dict(err.headers or {}), err.read().decode(errors="replace")
+        except (urllib.error.URLError, TimeoutError) as err:
+            raise RpcError(INTERNAL_ERROR, f"MCP gateway unreachable: {err}") from err
+
+
+class MCPToolProvider(ToolProvider):
+    """The agent's MCP tools, as listed by the agent gateway (already filtered
+    to the Agent's allow-list). Tool failures are returned to the model as
+    text so it can recover, instead of failing the whole request."""
+
+    def __init__(self, client: MCPClient) -> None:
+        self.client = client
+        self._tools: Optional[List[Dict[str, Any]]] = None
+
+    def definitions(self) -> List[Dict[str, Any]]:
+        if self._tools is None:
+            try:
+                self._tools = self.client.list_tools()
+            except RpcError as err:
+                print(json.dumps({"msg": "MCP tools unavailable", "error": err.message}), flush=True)
+                self.client.reset()
+                return []  # retried on the next request
+        return [{"type": "function", "function": {
+            "name": t["name"], "description": t.get("description", ""),
+            "parameters": t.get("inputSchema") or {"type": "object", "properties": {}},
+        }} for t in self._tools]
+
+    def call(self, name: str, arguments: str, traceparent: str = "") -> str:
+        try:
+            args = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            return f"Error: arguments for {name} are not valid JSON"
+        try:
+            result = self.client.call_tool(name, args if isinstance(args, dict) else {}, traceparent)
+        except RpcError as err:
+            self.client.reset()
+            return "Error: " + err.message
+        text = "\n".join(c.get("text", "") for c in result.get("content") or [] if c.get("type") == "text")
+        return ("Error: " + text) if result.get("isError") else text
 
 
 class ConversationStore:
@@ -381,7 +514,7 @@ class DeclarativeAgent:
             messages = [*messages, reply]
             for call in calls:
                 fn = call.get("function") or {}
-                result = self.tools.call(fn.get("name", ""), fn.get("arguments") or "{}")
+                result = self.tools.call(fn.get("name", ""), fn.get("arguments") or "{}", span.context.traceparent())
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": result})
         raise RpcError(INTERNAL_ERROR, f"no answer after {self.max_tool_rounds} tool rounds")
 
@@ -452,11 +585,14 @@ def main() -> None:
     )
     chat = ChatClient(env.get("AGENTORY_LLM_BASE_URL", ""), env.get("AGENTORY_LLM_API_KEY", ""),
                       env.get("AGENTORY_MODEL", "mock/mock-model"))
-    agent = DeclarativeAgent(cfg, chat, tracer, agent_name=name)
+    tools: ToolProvider = ToolProvider()
+    if cfg.mcp and env.get("AGENTORY_MCP_URL"):
+        tools = MCPToolProvider(MCPClient(env["AGENTORY_MCP_URL"]))
+    agent = DeclarativeAgent(cfg, chat, tracer, tools=tools, agent_name=name)
     port = int(env.get("PORT", "8080"))
     server = build_server(agent, load_card(env.get("AGENTORY_AGENT_CARD_PATH"), name), port=port)
     print(json.dumps({"msg": f"declarative agent {name} listening on :{port}",
-                      "skills": [s.name for s in cfg.skills]}), flush=True)
+                      "skills": [s.name for s in cfg.skills], "mcp": isinstance(tools, MCPToolProvider)}), flush=True)
     server.serve_forever()
 
 
