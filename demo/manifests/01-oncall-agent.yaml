@@ -1,0 +1,40 @@
+# Scenario 1: an on-call agent, written by the payments team, no code.
+# A runbook as a skill, plus two of the three on-call tools.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skill-payments-triage-v1
+  namespace: team-payments
+immutable: true
+data:
+  SKILL.md: |
+    ---
+    name: payments-triage
+    description: Triage a payments incident
+    ---
+    1. Check what changed: recent deploys of the failing service.
+    2. Check how bad it is: the current error rate against the baseline.
+    3. If a deploy in the last hour lines up with the errors, recommend
+       rolling it back. Never roll back yourself: a human approves.
+---
+apiVersion: agentory.dev/v1alpha1
+kind: Agent
+metadata:
+  name: payments-oncall
+  namespace: team-payments
+spec:
+  description: First responder for payments incidents
+  runtime: declarative
+  lifecycle: service
+  declarative:
+    instructions: |
+      You are the payments on-call agent. Investigate with your tools before
+      answering, cite what you found, and keep answers short.
+    skills:
+      - name: payments-triage
+        source: { configMap: { name: skill-payments-triage-v1 } }
+  model: { provider: ${MODEL_PROVIDER}, name: ${MODEL_NAME} }
+  tools:
+    mcpServers:
+      - name: oncall
+        tools: [get_recent_deploys, get_error_rate]   # not get_pod_events

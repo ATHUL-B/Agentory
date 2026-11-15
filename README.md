@@ -9,7 +9,8 @@ tracing, budgets and approvals built in.
 First use case: **internal on-call agents** that teams can onboard quickly
 and trust.
 
-> Status: design phase. See [`docs/`](docs/).
+> Status: working prototype on a local kind cluster. See the
+> [demo](demo/README.md) and [`docs/`](docs/).
 
 ## Docs
 
@@ -32,6 +33,7 @@ export ANTHROPIC_API_KEY=...   # optional, enables real model calls
 make up       # kind + Calico, Bifrost, agentgateway, OTel collector, Jaeger
 make operator-up  # build + deploy the Agentory operator (Agent/Task CRDs)
 make smoke    # end-to-end checks
+make demo     # the four-scenario on-call demo: demo/README.md
 make down
 ```
 

@@ -18,7 +18,7 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 6a | Enforce `a2a.allowedCallers` at the agent gateway (needs per-agent caller identity: ServiceAccount token or actor JWT, see 23) | P1 | todo | HLD needed | - |
 | 6b | MCP routing per agent: `/mcp/<ns>/<agent>` on agentgateway with the agent's `tools.mcpServers` allow-list; platform MCP server registry | P1 | done | HLD-0001 §4.6 | - |
 | 6c | Credentials for MCP servers: per-server secret injected by the gateway (`static.policies.auth` / backend auth), never in the agent pod | P1 | todo | - | - |
-| 6d | agentgateway tracing to the collector, so MCP and A2A hops appear in the same trace | P2 | todo | - | - |
+| 6d | agentgateway tracing to the collector, so MCP and A2A hops appear in the same trace. Today the gateway starts a span it doesn't export, so called agents show as separate branches of the trace (seen in `make demo`, scenario 3) | P1 | todo | - | - |
 | 7 | `JobBackend` + `runtime: harness` (Claude Code first) + Task lifecycle and results | P0 | done | HLD-0001 §5.3, §4.4 | - |
 | 7a | Harness workspaces: clone `harness.workspace.git` per Task, through a controlled egress exception (git host allow-list via an egress proxy), and push a result branch | P1 | todo | HLD needed | - |
 | 7b | Codex harness image (`kind: codex`) | P2 | todo | - | - |
@@ -27,7 +27,7 @@ Priority: P0 (prototype), P1 (on-call MVP), P2 (later).
 | 8 | Declarative runtime (Python): A2A server, skills, MCP via gateway, OTel | P0 | done (MCP waits for 6b) | HLD-0001 §5.2, §4.5 | - |
 | 8a | Skills from git (commit) and OCI (digest): fetch outside the locked-down pod (operator-side into ConfigMaps, or an init step through an egress proxy) | P1 | todo | HLD needed | - |
 | 8c | Conversation memory outside the pod (Redis/Postgres) so declarative agents scale past one replica | P1 | todo | - | - |
-| 9 | End-to-end demo script (four scenarios) | P0 | todo | HLD-0001 §9 | - |
+| 9 | End-to-end demo script (four scenarios): `make demo`, self-checking; BYO multi-agent example; trace tree renderer | P0 | done | HLD-0001 §9 | - |
 | 9a | Mock LLM provider (`mock/mock-model`) behind Bifrost: deterministic replies, tool calls, streaming, error injection; used by `make smoke` | P0 | done | HLD-0001 §9 | - |
 
 ## On-call MVP (P1)

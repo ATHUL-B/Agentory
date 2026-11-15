@@ -137,6 +137,10 @@ class SpanContext:
         return f"00-{self.trace_id}-{self.span_id}-01"
 
 
+SPAN_KIND_INTERNAL = 1
+SPAN_KIND_SERVER = 2
+
+
 class Tracer:
     """Minimal OpenTelemetry tracer exporting OTLP/HTTP JSON (no SDK needed).
     Export failures are ignored: tracing must never break a request."""
@@ -165,10 +169,11 @@ class Tracer:
             return None
         return SpanContext(trace_id=match.group(1), span_id=match.group(2))
 
-    def start(self, name: str, parent: Optional[SpanContext], attributes: Dict[str, Any]) -> "Span":
+    def start(self, name: str, parent: Optional[SpanContext], attributes: Dict[str, Any],
+              kind: int = SPAN_KIND_SERVER) -> "Span":
         trace_id = parent.trace_id if parent else secrets.token_hex(16)
         return Span(self, name, SpanContext(trace_id, secrets.token_hex(8)),
-                    parent.span_id if parent else "", attributes, self._clock())
+                    parent.span_id if parent else "", attributes, self._clock(), kind)
 
     def export(self, span: "Span") -> None:
         if not self.endpoint:
@@ -200,8 +205,9 @@ def _attr(key: str, value: Any) -> Dict[str, Any]:
 
 class Span:
     def __init__(self, tracer: Tracer, name: str, context: SpanContext, parent_span_id: str,
-                 attributes: Dict[str, Any], start_ns: int) -> None:
+                 attributes: Dict[str, Any], start_ns: int, kind: int = SPAN_KIND_SERVER) -> None:
         self.tracer = tracer
+        self.kind = kind
         self.name = name
         self.context = context
         self.parent_span_id = parent_span_id
@@ -220,7 +226,7 @@ class Span:
             "traceId": self.context.trace_id,
             "spanId": self.context.span_id,
             "name": self.name,
-            "kind": 2,  # SERVER
+            "kind": self.kind,
             "startTimeUnixNano": str(self.start_ns),
             "endTimeUnixNano": str(self.end_ns),
             "attributes": [_attr(k, v) for k, v in self.attributes.items()],
@@ -514,9 +520,20 @@ class DeclarativeAgent:
             messages = [*messages, reply]
             for call in calls:
                 fn = call.get("function") or {}
-                result = self.tools.call(fn.get("name", ""), fn.get("arguments") or "{}", span.context.traceparent())
+                result = self._call_tool(fn.get("name", ""), fn.get("arguments") or "{}", call.get("id"), span)
                 messages.append({"role": "tool", "tool_call_id": call.get("id"), "content": result})
         raise RpcError(INTERNAL_ERROR, f"no answer after {self.max_tool_rounds} tool rounds")
+
+    def _call_tool(self, name: str, arguments: str, call_id: Optional[str], parent: Span) -> str:
+        """Runs one tool call in its own execute_tool span (OTel GenAI conventions)."""
+        span = self.tracer.start("execute_tool " + name, parent.context, {
+            "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": name,
+            "gen_ai.tool.call.id": call_id or "",
+        }, kind=SPAN_KIND_INTERNAL)
+        result = self.tools.call(name, arguments, span.context.traceparent())
+        # Tool providers report failures as "Error: ..." text for the model.
+        span.end(error=result[:200] if result.startswith("Error:") else None)
+        return result
 
 
 # --------------------------------------------------------------------------- HTTP
